@@ -23,13 +23,20 @@ import {
   getDefaultDbPath,
   DEFAULT_MULTI_GET_MAX_BYTES,
   parseMetadataFilter,
+  parseMetadataMatch,
   type QMDStore,
   type ExpandedQuery,
   type IndexStatus,
   type DocumentMetadata,
   type MetadataFilter,
+  type MetadataMatch,
+  type MetadataKeyOverview,
+  type ListMetadataResult,
+  MetadataBindingBudgetError,
+  MetadataOptionError,
 } from "../index.js";
 import { getConfigPath } from "../collections.js";
+import { formatMetadataKeySummaries } from "../metadata-format.js";
 import { enableProductionMode } from "../store.js";
 import { checkRequestOrigin, resolveOriginGuard } from "./origin-guard.js";
 
@@ -61,6 +68,28 @@ function validateFilterArgument(filter: unknown): { filter?: MetadataFilter; err
   }
 }
 
+/** Same grammar as the filter, validated against metadata entries for discovery. */
+function validateMatchArgument(match: unknown): { match?: MetadataMatch; error?: string } {
+  if (match === undefined) return {};
+  try {
+    return { match: parseMetadataMatch(match) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Pick the named fields of a JSON body that must be numbers when present. */
+function readNumberFields(params: Record<string, unknown>, names: string[]): { values: Record<string, number>; error?: string } {
+  const values: Record<string, number> = {};
+  for (const name of names) {
+    const value = params[name];
+    if (value === undefined) continue;
+    if (typeof value !== "number") return { values, error: `Invalid field: ${name} (must be a number)` };
+    values[name] = value;
+  }
+  return { values };
+}
+
 type StatusResult = {
   totalDocuments: number;
   needsEmbedding: number;
@@ -71,6 +100,8 @@ type StatusResult = {
     pattern: string | null;
     documents: number;
     lastUpdated: string;
+    metadataKeyCount: number;
+    metadataKeys: MetadataKeyOverview[];
   }[];
 };
 
@@ -610,11 +641,128 @@ Intent-aware lex (C++ performance, not sports):
 
       for (const col of status.collections) {
         summary.push(`    - ${col.name}: ${col.path} (${col.documents} docs)`);
+        if (col.metadataKeys.length > 0) {
+          const keyLabels = col.metadataKeys.map(overview => `${overview.key} (${overview.types.join(" | ")})`);
+          const hiddenKeys = col.metadataKeyCount - col.metadataKeys.length;
+          summary.push(`      metadata keys: ${keyLabels.join(", ")}${hiddenKeys > 0 ? `, +${hiddenKeys} more` : ""}`);
+        }
+      }
+
+      if (status.collections.some(col => col.metadataKeys.length > 0)) {
+        summary.push(`  Metadata: call the 'metadata' tool to see values and counts before writing a 'filter'`);
       }
 
       return {
         content: [{ type: "text", text: summary.join('\n') }],
         structuredContent: status,
+      };
+    })
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: qmd_metadata (Metadata discovery)
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "metadata",
+    {
+      title: "Metadata Discovery",
+      description: `Discover which metadata keys exist, what types they hold, and how many documents share each value, so you can write a precise \`filter\` for the query tool.
+
+Documents carry metadata as \`qmd.metadata\` frontmatter (strings, numbers, booleans, or arrays of one of those). This tool reports what is indexed, never guesses.
+
+## Mental model
+
+\`filter\` selects WHICH documents are counted. \`match\` selects WHICH metadata entries of those documents are reported. Both take the same recursive AST as the query tool's \`filter\`. A condition tests one \`field\` of the record under evaluation: for \`filter\` the record is a document and \`field\` names one of its metadata keys, for \`match\` the record is a metadata entry and \`field\` is \`"key"\` (the entry's key name) or \`"value"\` (its value). Every operator applies (eq/ne/gt/gte/lt/lte, in/nin, contains/prefix/suffix, type, and/or/not, caseInsensitive), except \`exists\` and \`all\`, which have no meaning for a single entry.
+
+| match | Question answered |
+|---|---|
+| (none) | Which keys exist, with a window of values each |
+| \`{"field":"key","operator":"eq","value":"topics"}\` | Everything about one key |
+| \`{"field":"key","operator":"prefix","value":"mem-"}\` | A family of keys |
+| \`{"field":"key","operator":"in","value":["tags","topics","labels"]}\` | Which of these key names exist |
+| \`{"field":"value","operator":"eq","value":"docs-team"}\` | Which keys hold this value (reverse lookup) |
+| \`{"field":"value","operator":"prefix","value":"2025-"}\` | Which keys hold values shaped like this |
+| \`{"field":"value","operator":"type","value":"boolean"}\` | Which keys hold booleans |
+| \`{"operator":"and","operands":[{"field":"key","operator":"eq","value":"priority"},{"field":"value","operator":"gte","value":3}]}\` | Values of one key above a threshold |
+| \`{"operator":"and","operands":[{"field":"key","operator":"eq","value":"priority"},{"field":"value","operator":"type","value":"number"}]}\` | The numeric side of a key whose documents disagree on type |
+
+Compose with and/or/not to ask several of these in one call. Add \`filter\` to any of them to see what remains after narrowing, e.g. the topics among published documents. The result then reports \`filteredDocuments\`, how many documents pass, and every coverage count is measured against that population.
+
+## Reading the result
+
+\`totalKeys\` keys have a matching entry. \`keys\` holds one window of them ordered by coverage (\`keyLimit\`, default 50, from \`keyOffset\`), and \`remainingKeys\` says how many follow the window. Each key splits by type. Metadata is validated per document, never across documents, so a key can hold numbers in some files and strings in others within a single collection as easily as across collections. A key with more than one type reports each type separately with its own document count and contributing collections, so you can see how many documents a typed filter would reach. Per type: \`documents\` holding it, \`distinctValues\`, one window of \`values\` with document counts (\`valueLimit\`, default 10, from \`valueOffset\`), and \`remainingValues\` after the window. Both remainders are exact. Numbers also report \`range\` (min, median, max) for writing gt/lt thresholds. Counts are documents, not values: a document with \`topics: [a, b]\` counts once for each.
+
+## Paging
+
+Page keys with \`keyOffset\` (next page starts at \`keyOffset + keys.length\`) and values with \`valueOffset\`, which applies to every key in the result and so reads best after \`match\` narrows to one key. Raise a limit instead when the remainder is small.
+
+Every value reported here can be matched with \`{field: '<metadata-key>', operator: 'eq', value}\` under the same collections.`,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: z.object({
+        collections: z.array(z.string()).optional().describe("Restrict to these collections (default: the same collections query searches)"),
+        match: z.record(z.string(), z.unknown()).optional().describe(
+          "Report only metadata entries matching this condition. Same recursive AST as 'filter', evaluated per entry: " +
+          "a condition's field is 'key' (the entry's key name) or 'value' (its value). Default: every entry. " +
+          "Example: {\"field\":\"key\",\"operator\":\"eq\",\"value\":\"topics\"}"
+        ),
+        filter: z.record(z.string(), z.unknown()).optional().describe(
+          "Count only documents matching this metadata filter. Same recursive AST as the query tool's 'filter'. " +
+          "Example: {\"field\":\"status\",\"operator\":\"eq\",\"value\":\"published\"}"
+        ),
+        keyLimit: z.number().int().positive().optional().default(50).describe("Keys reported (default: 50). 'remainingKeys' says how many follow the window"),
+        keyOffset: z.number().int().nonnegative().optional().default(0).describe("Keys skipped before the window, in report order (default: 0)"),
+        valueLimit: z.number().int().positive().optional().default(10).describe("Values reported per key and type (default: 10). 'remainingValues' says how many follow the window"),
+        valueOffset: z.number().int().nonnegative().optional().default(0).describe("Values skipped per key and type before the window, in 'sort' order (default: 0)"),
+        sort: z.enum(["count", "value"]).optional().default("count").describe("Order values by document count descending (default) or by value ascending"),
+        minCount: z.number().int().positive().optional().default(1).describe("Hide values held by fewer documents than this (default: 1)"),
+      }),
+    },
+    track(async ({ collections, match, filter, keyLimit, keyOffset, valueLimit, valueOffset, sort, minCount }) => {
+      const matchValidation = validateMatchArgument(match);
+      const filterValidation = validateFilterArgument(filter);
+      const validationError = matchValidation.error ?? filterValidation.error;
+      if (validationError) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${validationError}` }],
+          isError: true,
+        };
+      }
+
+      const effectiveCollections = collections ?? defaultCollectionNames;
+      let result: ListMetadataResult;
+      try {
+        result = await store.listMetadata({
+          collection: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+          match: matchValidation.match,
+          filter: filterValidation.filter,
+          keyLimit,
+          keyOffset,
+          valueLimit,
+          valueOffset,
+          sort,
+          minCount,
+        });
+      } catch (err) {
+        if (!(err instanceof MetadataBindingBudgetError)) throw err;
+        return {
+          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+          isError: true,
+        };
+      }
+
+      const text = formatMetadataKeySummaries(result, {
+        showCollections: effectiveCollections.length !== 1,
+        valueWindowHint: "a higher 'valueLimit' or a 'valueOffset'",
+        keyWindowHint: "a higher 'keyLimit' or a 'keyOffset'",
+        keyOffset,
+        keyOffsetLabel: "keyOffset",
+        emptyMessage: "No metadata matches. Call without match/filter to see every key, or check the status tool for collections with metadata.",
+      });
+
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: result,
       };
     })
   );
@@ -1102,6 +1250,103 @@ export async function startMcpHttpServer(
         nodeRes.writeHead(200, { "Content-Type": "application/json" });
         nodeRes.end(JSON.stringify({ results: formatted }));
         log(`${ts()} POST /query ${params.searches.length} queries (${Date.now() - reqStart}ms)`);
+        return;
+      }
+
+      // REST endpoint: POST /metadata — metadata discovery, same body as the metadata tool
+      if (pathname === "/metadata" && nodeReq.method === "POST") {
+        const rawBody = await collectBody(nodeReq);
+        let parsedParams: unknown;
+        try {
+          parsedParams = rawBody.trim() === "" ? {} : JSON.parse(rawBody);
+        } catch {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+        if (typeof parsedParams !== "object" || parsedParams === null || Array.isArray(parsedParams)) {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "JSON body must be an object" }));
+          return;
+        }
+        const params = parsedParams as Record<string, unknown>;
+
+        // Optional metadata filter — must be an object and a valid filter AST
+        let restFilter: MetadataFilter | undefined;
+        if (params.filter !== undefined) {
+          if (typeof params.filter !== "object" || params.filter === null || Array.isArray(params.filter)) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Invalid field: filter (must be an object)" }));
+            return;
+          }
+          const filterValidation = validateFilterArgument(params.filter);
+          if (filterValidation.error) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: filterValidation.error }));
+            return;
+          }
+          restFilter = filterValidation.filter;
+        }
+
+        // Optional metadata match, validated the same way against entries
+        let restMatch: MetadataMatch | undefined;
+        if (params.match !== undefined) {
+          if (typeof params.match !== "object" || params.match === null || Array.isArray(params.match)) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Invalid field: match (must be an object)" }));
+            return;
+          }
+          const matchValidation = validateMatchArgument(params.match);
+          if (matchValidation.error) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: matchValidation.error }));
+            return;
+          }
+          restMatch = matchValidation.match;
+        }
+
+        if (params.sort !== undefined && params.sort !== "count" && params.sort !== "value") {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Invalid field: sort (must be 'count' or 'value')" }));
+          return;
+        }
+
+        if (params.collections !== undefined && !Array.isArray(params.collections)) {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Invalid field: collections (must be an array)" }));
+          return;
+        }
+
+        // The JSON type is checked here; the store checks each number's domain.
+        const numberFields = readNumberFields(params, ["keyLimit", "keyOffset", "valueLimit", "valueOffset", "minCount"]);
+        if (numberFields.error) {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: numberFields.error }));
+          return;
+        }
+
+        // Use default collections if none specified
+        const effectiveCollections = params.collections ? params.collections.map(String) : defaultCollectionNames;
+
+        let result: ListMetadataResult;
+        try {
+          result = await store.listMetadata({
+            collection: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+            match: restMatch,
+            filter: restFilter,
+            sort: params.sort,
+            ...numberFields.values,
+          });
+        } catch (err) {
+          if (!(err instanceof MetadataOptionError) && !(err instanceof MetadataBindingBudgetError)) throw err;
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: err.message }));
+          return;
+        }
+
+        nodeRes.writeHead(200, { "Content-Type": "application/json" });
+        nodeRes.end(JSON.stringify(result));
+        log(`${ts()} POST /metadata ${result.keys.length} keys (${Date.now() - reqStart}ms)`);
         return;
       }
 
