@@ -19,7 +19,10 @@ import {
 } from "../src/store.js";
 import {
   buildGlobPrefilter,
+  countDocumentsPendingMetadata,
+  countDocumentsWithMetadata,
   listMetadata,
+  listMetadataKeys,
   replaceDocumentMetadata,
   type ListMetadataOptions,
   type MetadataKeySummary,
@@ -398,6 +401,41 @@ describe("listMetadata agrees with filtered search", () => {
         }
       }
     }
+  });
+});
+
+describe("status view helpers", () => {
+  beforeEach(async () => {
+    await insertMetadataDoc("notes", { status: "published", priority: 3 });
+    await insertMetadataDoc("notes", { status: "draft" });
+    await insertMetadataDoc("notes", {});
+    await insertMetadataDoc("work", { priority: "high", source: "jira" });
+    const pendingId = await insertMetadataDoc("work", { status: "ghost" });
+    store.db.prepare(`DELETE FROM document_metadata WHERE document_id = ?`).run(pendingId);
+  });
+
+  test("listMetadataKeys reports names, coverage, and types in coverage order", () => {
+    expect(listMetadataKeys(store.db)).toEqual([
+      { key: "priority", documents: 2, types: ["number", "string"] },
+      { key: "status", documents: 2, types: ["string"] },
+      { key: "source", documents: 1, types: ["string"] },
+    ]);
+    expect(listMetadataKeys(store.db, ["work"])).toEqual([
+      { key: "priority", documents: 1, types: ["string"] },
+      { key: "source", documents: 1, types: ["string"] },
+    ]);
+    expect(listMetadataKeys(store.db, ["missing"])).toEqual([]);
+  });
+
+  test("countDocumentsWithMetadata counts extracted documents declaring a key", () => {
+    expect(countDocumentsWithMetadata(store.db)).toBe(3);
+    expect(countDocumentsWithMetadata(store.db, ["notes"])).toBe(2);
+  });
+
+  test("countDocumentsPendingMetadata accepts a collection scope", () => {
+    expect(countDocumentsPendingMetadata(store.db)).toBe(1);
+    expect(countDocumentsPendingMetadata(store.db, ["notes"])).toBe(0);
+    expect(countDocumentsPendingMetadata(store.db, ["work"])).toBe(1);
   });
 });
 

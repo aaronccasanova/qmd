@@ -330,3 +330,34 @@ describe("qmd collection metadata", () => {
     expect(badSort.stderr).toContain("Invalid --sort value: size");
   }, 30000);
 });
+
+describe("metadata in collection list, show, and status", () => {
+  test("collection list names the top keys and counts the rest", async () => {
+    const { stdout, exitCode } = await runQmd(["collection", "list"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("  Metadata: status, priority, topics, owner, reviewed, +1 more\n");
+  }, 30000);
+
+  test("collection show details the top keys and points at the drill-down", async () => {
+    const { stdout, exitCode } = await runQmd(["collection", "show", "notes"]);
+    expect(exitCode).toBe(0);
+
+    const metadataSection = stdout.slice(stdout.indexOf("  Metadata:"));
+    expect(metadataSection).toBe([
+      "  Metadata: 6 keys, 5 of 6 documents",
+      "    status    string           5 docs   3 distinct  draft (2), published (2), archived (1)",
+      "    priority  number | string  3 docs   3 distinct  types disagree, see 'qmd collection metadata notes --key priority'",
+      "    topics    string[]         2 docs  13 distinct  typescript (2), agents (1), architecture (1), ...",
+      "    owner     string           1 doc    1 distinct",
+      "    reviewed  boolean          1 doc    1 distinct  false 1",
+      "    1 more key, see 'qmd collection metadata notes'",
+      "",
+    ].join("\n"));
+  }, 30000);
+
+  test("status summarizes metadata and points at the drill-down", async () => {
+    const { stdout, exitCode } = await runQmd(["status"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("  Metadata: 6 keys across 5 files (explore with 'qmd collection metadata')\n");
+  }, 30000);
+});

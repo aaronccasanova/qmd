@@ -167,9 +167,11 @@ function isDocumentMetadataCurrent(db: Database, documentId: number): boolean {
 /**
  * Count active documents without a current, error-free metadata extraction.
  * These documents are excluded from filtered search until `qmd update` runs.
+ * Scoped to `collectionNames` when given, otherwise the whole index.
  */
-export function countDocumentsPendingMetadata(db: Database): number {
-  const row = db.prepare(`
+export function countDocumentsPendingMetadata(db: Database, collectionNames?: string[]): number {
+  const params: SQLiteValue[] = [METADATA_EXTRACTION_VERSION];
+  let sql = `
     SELECT COUNT(*) as c FROM documents d
     WHERE d.active = 1
       AND NOT EXISTS (
@@ -177,8 +179,12 @@ export function countDocumentsPendingMetadata(db: Database): number {
         WHERE dm.document_id = d.id
           AND dm.extraction_version = ?
           AND dm.extraction_error IS NULL
-      )
-  `).get(METADATA_EXTRACTION_VERSION) as { c: number };
+      )`;
+  if (collectionNames) {
+    sql += ` AND d.collection IN (SELECT value FROM json_each(?))`;
+    params.push(JSON.stringify(collectionNames));
+  }
+  const row = db.prepare(sql).get(...params) as { c: number };
   return row.c;
 }
 
@@ -280,6 +286,15 @@ export interface MetadataKeyTypeSummary {
 export interface MetadataValueCount {
   value: MetadataScalar;
   documents: number;
+}
+
+/** The light form of a key summary for status views: name, coverage, and types, no values. */
+export interface MetadataKeyOverview {
+  key: string;
+  /** Distinct documents declaring the key with any type. */
+  documents: number;
+  /** By documents descending then name. Length > 1 is a type conflict. */
+  types: MetadataValueType[];
 }
 
 export type MetadataValueType = "string" | "number" | "boolean";
@@ -400,6 +415,44 @@ export function listMetadata(db: Database, options: ListMetadataOptions = {}): L
   result.keys.sort((a, b) => b.documents - a.documents || a.key.localeCompare(b.key));
 
   return result;
+}
+
+/**
+ * Key names, coverage, and types for the documents in scope, in coverage
+ * order. One GROUP BY, no values: what `collection list`, `status`, and the
+ * MCP status tool print so a first look reveals that metadata exists.
+ */
+export function listMetadataKeys(db: Database, collectionNames?: string[]): MetadataKeyOverview[] {
+  const region = buildRegion(buildEligibleCte(collectionNames, undefined));
+
+  const documentsByKeyType = new Map<string, Map<MetadataValueType, number>>();
+  for (const row of queryTypeStats(db, region)) {
+    const documentsByType = documentsByKeyType.get(row.key) ?? new Map<MetadataValueType, number>();
+    documentsByType.set(row.value_type, row.documents);
+    documentsByKeyType.set(row.key, documentsByType);
+  }
+
+  const overviews: MetadataKeyOverview[] = [];
+  for (const [key, documentsByType] of documentsByKeyType) {
+    const typeEntries = [...documentsByType.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    overviews.push({
+      key,
+      documents: typeEntries.reduce((sum, [, documents]) => sum + documents, 0),
+      types: typeEntries.map(([type]) => type),
+    });
+  }
+  return overviews.sort((a, b) => b.documents - a.documents || a.key.localeCompare(b.key));
+}
+
+/** Active, extracted documents in scope that declare at least one metadata key. */
+export function countDocumentsWithMetadata(db: Database, collectionNames?: string[]): number {
+  const region = buildRegion(buildEligibleCte(collectionNames, undefined));
+  const row = db.prepare(`
+    ${region.withSql}
+    SELECT COUNT(DISTINCT mv.document_id) AS c
+    ${region.fromSql}
+  `).get(...region.withParams, ...region.fromParams) as { c: number };
+  return row.c;
 }
 
 /**

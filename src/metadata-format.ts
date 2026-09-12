@@ -59,6 +59,86 @@ export function formatMetadataKeySummary(summary: MetadataKeySummary, result: Li
   return lines.join("\n");
 }
 
+export interface FormatMetadataOverviewOptions {
+  /** Active, extracted documents declaring at least one key. */
+  documentsWithMetadata: number;
+  /** Active documents awaiting extraction, mentioned so the coverage reads honestly. */
+  pendingMetadata: number;
+  /** Keys detailed before the "more keys" pointer. */
+  keyLimit: number;
+  /** Command that shows the rest, e.g. `qmd collection metadata notes`. */
+  drillDownHint: string;
+  colors?: MetadataFormatColors;
+}
+
+/**
+ * The `Metadata:` section of `collection show`: a coverage line, then the
+ * top keys by coverage as aligned rows with a short value preview, then a
+ * pointer at the drill-down when keys were left out. Indented to sit under
+ * the other `show` fields.
+ */
+export function formatMetadataOverview(result: ListMetadataResult, options: FormatMetadataOverviewOptions): string {
+  const colors = options.colors ?? NO_COLORS;
+  const pendingNote = options.pendingMetadata > 0 ? ` (${formatCount(options.pendingMetadata)} pending extraction)` : "";
+
+  if (result.keys.length === 0) return `  Metadata: none${pendingNote}`;
+
+  const keyLabel = result.keys.length === 1 ? "key" : "keys";
+  const lines = [`  Metadata: ${formatCount(result.keys.length)} ${keyLabel}, ${formatCount(options.documentsWithMetadata)} of ${formatCount(result.documents)} documents${pendingNote}`];
+
+  const shownKeys = result.keys.slice(0, options.keyLimit);
+  const keyWidth = Math.max(...shownKeys.map(summary => summary.key.length));
+  const typeWidth = Math.max(...shownKeys.map(summary => summary.types.map(typeLabelOf).join(" | ").length));
+  const documentsWidth = Math.max(...shownKeys.map(summary => formatCount(summary.documents).length));
+  const distinctWidth = Math.max(...shownKeys.map(summary => formatCount(distinctValuesOf(summary)).length));
+
+  for (const summary of shownKeys) {
+    const typeLabel = summary.types.map(typeLabelOf).join(" | ");
+    const columns = [
+      `${colors.cyan}${summary.key.padEnd(keyWidth)}${colors.reset}`,
+      `${colors.dim}${typeLabel.padEnd(typeWidth)}${colors.reset}`,
+      `${formatCount(summary.documents).padStart(documentsWidth)} ${documentsLabelOf(summary.documents)}`,
+      `${formatCount(distinctValuesOf(summary)).padStart(distinctWidth)} distinct`,
+    ];
+    const preview = formatValuePreview(summary, options.drillDownHint);
+    if (preview) columns.push(preview);
+    lines.push(`    ${columns.join("  ")}`);
+  }
+
+  const hiddenKeys = result.keys.length - shownKeys.length;
+  if (hiddenKeys > 0) {
+    lines.push(`    ${colors.dim}${formatCount(hiddenKeys)} more ${hiddenKeys === 1 ? "key" : "keys"}, see '${options.drillDownHint}'${colors.reset}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * One-line value preview for the overview row. Strings list the window with
+ * a trailing ellipsis when truncated, and nothing at all when every value is
+ * unique (a value list would be noise). Numbers give the range, booleans the
+ * two counts, and a type conflict points at the drill-down.
+ */
+function formatValuePreview(summary: MetadataKeySummary, drillDownHint: string): string {
+  if (summary.types.length > 1) return `types disagree, see '${drillDownHint} --key ${summary.key}'`;
+
+  const typeSummary = summary.types[0]!;
+  if (typeSummary.type === "boolean") return formatBooleanCounts(typeSummary.values).replace("  ", ", ");
+  if (typeSummary.type === "number") {
+    const range = typeSummary.range!;
+    return `${formatValue(range.min)} to ${formatValue(range.max)}, median ${formatValue(range.median)}`;
+  }
+  if (typeSummary.distinctValues === typeSummary.documents) return "";
+
+  const preview = typeSummary.values.map(count => `${formatValue(count.value)} (${formatCount(count.documents)})`);
+  if (typeSummary.remaining > 0) preview.push("...");
+  return preview.join(", ");
+}
+
+function distinctValuesOf(summary: MetadataKeySummary): number {
+  return summary.types.reduce((sum, typeSummary) => sum + typeSummary.distinctValues, 0);
+}
+
 /** Body for a key with one type: vertical values for strings, a range for numbers, one line for booleans. */
 function formatTypeBody(typeSummary: MetadataKeyTypeSummary): string[] {
   if (typeSummary.type === "boolean") return [`  ${formatBooleanCounts(typeSummary.values)}`];
@@ -92,8 +172,7 @@ function formatTypeSplit(typeSummaries: MetadataKeyTypeSummary[], options: Forma
       if (typeSummary.remaining > 0) inlineValues.push(`${formatCount(typeSummary.remaining)} more`);
       valuesSummary = inlineValues.join(", ");
     }
-    const documentsLabel = typeSummary.documents === 1 ? "doc " : "docs";
-    const row = `  ${typeSummary.type.padEnd(typeWidth)}  ${formatCount(typeSummary.documents).padStart(documentsWidth)} ${documentsLabel}  ${valuesSummary}`;
+    const row = `  ${typeSummary.type.padEnd(typeWidth)}  ${formatCount(typeSummary.documents).padStart(documentsWidth)} ${documentsLabelOf(typeSummary.documents)}  ${valuesSummary}`;
     return { row, collections: typeSummary.collections.join(", ") };
   });
 
@@ -131,6 +210,11 @@ function formatBooleanCounts(values: MetadataValueCount[]): string {
   if (trueCount) parts.push(`true ${formatCount(trueCount.documents)}`);
   if (falseCount) parts.push(`false ${formatCount(falseCount.documents)}`);
   return parts.join("  ");
+}
+
+/** Padded so `doc` and `docs` rows stay column-aligned. */
+function documentsLabelOf(documents: number): string {
+  return documents === 1 ? "doc " : "docs";
 }
 
 function formatValue(value: string | number | boolean): string {
