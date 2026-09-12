@@ -258,7 +258,10 @@ export interface MetadataKeySummary {
 
 export interface MetadataKeyTypeSummary {
   type: MetadataValueType;
-  /** True when any document holds this key as an array. */
+  /**
+   * True when any document holds more than one value for this key. A
+   * one-element array is indistinguishable from a scalar in the index.
+   */
   multiValued: boolean;
   /** Distinct documents holding a matching value of this type. */
   documents: number;
