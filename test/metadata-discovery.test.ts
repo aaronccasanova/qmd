@@ -14,6 +14,8 @@ import {
   insertDocument,
   hashContent,
   searchFTS,
+  getStatus,
+  getStatusSummary,
   type Store,
 } from "../src/store.js";
 import {
@@ -967,6 +969,23 @@ describe("status view helpers", () => {
   test("countDocumentsWithMetadata counts extracted documents declaring a key", () => {
     expect(countDocumentsWithMetadata(store.db)).toBe(3);
     expect(countDocumentsWithMetadata(store.db, ["notes"])).toBe(2);
+  });
+
+  test("status batches metadata overviews and initialization reads no metadata values", () => {
+    const statements: string[] = [];
+    const observed = observeStatements(store.db, sql => statements.push(sql));
+    const status = getStatus(observed);
+    expect(status.collections).toHaveLength(2);
+    expect(status.collections.find(collection => collection.name === "notes")?.metadataKeyCount).toBe(2);
+    expect(statements.filter(sql => sql.includes("document_metadata_values"))).toHaveLength(1);
+
+    statements.length = 0;
+    const summary = getStatusSummary(observed);
+    expect(summary.totalDocuments).toBe(status.totalDocuments);
+    expect(summary.pendingMetadata).toBe(status.pendingMetadata);
+    expect(summary.collections.map(collection => collection.name)).toEqual(status.collections.map(collection => collection.name));
+    expect(summary.collections[0]).not.toHaveProperty("metadataKeys");
+    expect(statements.some(sql => sql.includes("document_metadata_values"))).toBe(false);
   });
 
   test("countDocumentsPendingMetadata accepts a collection scope", () => {
