@@ -94,6 +94,47 @@ describe("SDK metadata filter", () => {
       filter: { operator: "and", operands: [] },
     })).rejects.toThrow(/non-empty 'operands'/);
   });
+
+  test("listMetadata summarizes keys, types, and value counts", async () => {
+    const result = await store.listMetadata();
+    expect(result.documents).toBe(2);
+    expect(result.filteredDocuments).toBeUndefined();
+    expect(result.keys.map(summary => summary.key)).toEqual(["status", "topics"]);
+
+    const topics = result.keys[1]!.types[0]!;
+    expect(topics).toMatchObject({ type: "string", documents: 2, distinctValues: 1, remaining: 0, collections: ["docs"] });
+    expect(topics.values).toEqual([{ value: "typescript", documents: 2 }]);
+  });
+
+  test("listMetadata scopes, narrows by filter, and matches patterns", async () => {
+    const filtered = await store.listMetadata({
+      collection: "docs",
+      key: "status",
+      filter: { key: "status", operator: "eq", value: "published" },
+    });
+    expect(filtered.filteredDocuments).toBe(1);
+    expect(filtered.keys[0]!.types[0]!.values).toEqual([{ value: "published", documents: 1 }]);
+
+    const reverse = await store.listMetadata({ value: "dra*" });
+    expect(reverse.keys.map(summary => summary.key)).toEqual(["status"]);
+
+    const scoped = await store.listMetadata({ collection: "missing" });
+    expect(scoped).toEqual({ documents: 0, keys: [] });
+  });
+
+  test("listMetadata validates filters at the SDK runtime boundary", async () => {
+    // Plain-JS callers bypass the declarations, so the SDK must reject a bad AST at runtime.
+    const untrustedOptions: import("../src/index.js").ListMetadataOptions = JSON.parse('{"filter":{"key":"status","operator":"equal","value":"x"}}');
+    await expect(store.listMetadata(untrustedOptions)).rejects.toThrow(/unknown operator 'equal'/);
+  });
+
+  test("getStatus lists metadata keys per collection", async () => {
+    const status = await store.getStatus();
+    expect(status.collections[0]!.metadataKeys).toEqual([
+      { key: "status", documents: 2, types: ["string"] },
+      { key: "topics", documents: 2, types: ["string"] },
+    ]);
+  });
 });
 
 // =============================================================================
@@ -121,6 +162,7 @@ describe("MCP and HTTP metadata filter", () => {
     const internal = createInternalStore(dbPath);
     await seedDoc(internal.db, "published.md", "# Pub\n\nhttp keyword body", { status: "published" });
     await seedDoc(internal.db, "draft.md", "# Draft\n\nhttp keyword body", { status: "draft" });
+    await seedDoc(internal.db, "tagged.md", "# Tagged\n\nhttp keyword body", { status: "archived", topics: ["sqlite", "search"], priority: 3 });
 
     const testConfig: CollectionConfig = {
       collections: { docs: { path: "/test/docs", pattern: "**/*.md" } },
@@ -160,6 +202,10 @@ describe("MCP and HTTP metadata filter", () => {
   }
 
   async function callQueryTool(args: Record<string, unknown>): Promise<{ status: number; json: any }> {
+    return callTool("query", args);
+  }
+
+  async function callTool(name: string, args: Record<string, unknown>): Promise<{ status: number; json: any }> {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: "POST",
       headers: {
@@ -167,14 +213,14 @@ describe("MCP and HTTP metadata filter", () => {
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": "2026-07-28",
         "Mcp-Method": "tools/call",
-        "Mcp-Name": "query",
+        "Mcp-Name": name,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
         params: {
-          name: "query",
+          name,
           arguments: args,
           _meta: {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -255,5 +301,82 @@ describe("MCP and HTTP metadata filter", () => {
     expect(status).toBe(200);
     expect(json.result.isError).toBe(true);
     expect(json.result.content[0].text).toMatch(/non-empty 'operands'/);
+  });
+
+  test("MCP metadata tool returns key summaries as structured content and CLI-shaped text", async () => {
+    const { status, json } = await callTool("metadata", { key: "status" });
+    expect(status).toBe(200);
+    expect(json.result.isError).toBeFalsy();
+
+    const result = json.result.structuredContent;
+    expect(result.documents).toBe(3);
+    expect(result.keys).toHaveLength(1);
+    expect(result.keys[0].types[0]).toMatchObject({ type: "string", documents: 3, distinctValues: 3, remaining: 0 });
+    expect(result.keys[0].types[0].values).toEqual([
+      { value: "archived", documents: 1 },
+      { value: "draft", documents: 1 },
+      { value: "published", documents: 1 },
+    ]);
+    expect(json.result.content[0].text).toBe("status  string  3 of 3 documents  3 distinct\n  archived   1\n  draft      1\n  published  1");
+  });
+
+  test("MCP metadata tool narrows by filter, windows values, and reports the remainder", async () => {
+    const { json } = await callTool("metadata", {
+      key: "topics",
+      limit: 1,
+      filter: { key: "status", operator: "eq", value: "archived" },
+    });
+    const result = json.result.structuredContent;
+    expect(result.filteredDocuments).toBe(1);
+    const topics = result.keys[0].types[0];
+    expect(topics.multiValued).toBe(true);
+    expect(topics.values).toHaveLength(1);
+    expect(topics.remaining).toBe(1);
+    expect(json.result.content[0].text).toContain("1 more values, use a higher 'limit'");
+  });
+
+  test("MCP metadata tool rejects invalid filters", async () => {
+    const { json } = await callTool("metadata", { filter: { key: "status", operator: "equal", value: "x" } });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toMatch(/unknown operator 'equal'/);
+  });
+
+  test("MCP status tool lists metadata keys per collection", async () => {
+    const { json } = await callTool("status", {});
+    expect(json.result.isError).toBeFalsy();
+    expect(json.result.structuredContent.collections[0].metadataKeys).toEqual([
+      { key: "status", documents: 3, types: ["string"] },
+      { key: "priority", documents: 1, types: ["number"] },
+      { key: "topics", documents: 1, types: ["string"] },
+    ]);
+    expect(json.result.content[0].text).toContain("metadata keys: status (string), priority (number), topics (string)");
+    expect(json.result.content[0].text).toContain("call the 'metadata' tool");
+  });
+
+  test("POST /metadata returns the same result as the tool", async () => {
+    const { status, json } = await postJson("/metadata", { key: "priority" });
+    expect(status).toBe(200);
+    expect(json.documents).toBe(3);
+    expect(json.keys[0].types[0]).toMatchObject({ type: "number", range: { min: 3, median: 3, max: 3 } });
+
+    const reverse = await postJson("/metadata", { value: "search", limit: 5 });
+    expect(reverse.json.keys.map((summary: { key: string }) => summary.key)).toEqual(["topics"]);
+  });
+
+  test("POST /metadata rejects invalid bodies, filters, and sort with 400", async () => {
+    const stringFilter = await postJson("/metadata", { filter: "status = published" });
+    expect(stringFilter.status).toBe(400);
+    expect(stringFilter.json.error).toMatch(/must be an object/);
+
+    const invalidAst = await postJson("/metadata", { filter: { key: "status", operator: "equal", value: "x" } });
+    expect(invalidAst.status).toBe(400);
+    expect(invalidAst.json.error).toMatch(/unknown operator 'equal'/);
+
+    const badSort = await postJson("/metadata", { sort: "size" });
+    expect(badSort.status).toBe(400);
+    expect(badSort.json.error).toMatch(/sort/);
+
+    const arrayBody = await fetch(`${baseUrl}/metadata`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" });
+    expect(arrayBody.status).toBe(400);
   });
 });

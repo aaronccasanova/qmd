@@ -28,8 +28,10 @@ import {
   type IndexStatus,
   type DocumentMetadata,
   type MetadataFilter,
+  type MetadataKeyOverview,
 } from "../index.js";
 import { getConfigPath } from "../collections.js";
+import { formatMetadataKeySummaries } from "../metadata-format.js";
 import { enableProductionMode } from "../store.js";
 import { checkRequestOrigin, resolveOriginGuard } from "./origin-guard.js";
 
@@ -71,6 +73,7 @@ type StatusResult = {
     pattern: string | null;
     documents: number;
     lastUpdated: string;
+    metadataKeys: MetadataKeyOverview[];
   }[];
 };
 
@@ -608,11 +611,96 @@ Intent-aware lex (C++ performance, not sports):
 
       for (const col of status.collections) {
         summary.push(`    - ${col.name}: ${col.path} (${col.documents} docs)`);
+        if (col.metadataKeys.length > 0) {
+          const keyLabels = col.metadataKeys.map(overview => `${overview.key} (${overview.types.join(" | ")})`);
+          summary.push(`      metadata keys: ${keyLabels.join(", ")}`);
+        }
+      }
+
+      if (status.collections.some(col => col.metadataKeys.length > 0)) {
+        summary.push(`  Metadata: call the 'metadata' tool to see values and counts before writing a 'filter'`);
       }
 
       return {
         content: [{ type: "text", text: summary.join('\n') }],
         structuredContent: status,
+      };
+    })
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: qmd_metadata (Metadata discovery)
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "metadata",
+    {
+      title: "Metadata Discovery",
+      description: `Discover which metadata keys exist, what types they hold, and how many documents share each value, so you can write a precise \`filter\` for the query tool.
+
+Documents carry metadata as \`qmd.metadata\` frontmatter (strings, numbers, booleans, or arrays of one of those). This tool reports what is indexed, never guesses.
+
+## Mental model
+
+\`key\` and \`value\` are glob patterns that select WHERE to look in the key/value space. \`filter\` selects WHICH documents are counted. They compose:
+
+| key | value | Question answered |
+|---|---|---|
+| | | Which keys exist, with a window of values each |
+| \`topics\` | | Everything about one key |
+| \`mem-*\` | | Which keys look like this |
+| | \`docs-team\` | Which keys hold this value (reverse lookup) |
+| | \`2025-*\` | Which keys hold values shaped like this |
+| \`topics\` | \`type*\` | Values of one key matching a pattern |
+
+Add \`filter\` to any of these to see what remains after narrowing, e.g. the topics among published documents. The header then reports how many documents pass the filter.
+
+## Reading the result
+
+One entry per key, ordered by coverage. Each key splits by type. Metadata is validated per document, never across documents, so a key can hold numbers in some files and strings in others within a single collection as easily as across collections. A key with more than one type reports each type separately with its own document count and contributing collections, so you can see how many documents a typed filter would reach. Per type: \`documents\` holding it, \`distinctValues\`, the windowed \`values\` with document counts, and \`remaining\` values not shown. \`remaining\` is exact: raise \`limit\` to see them. Numbers also report \`range\` (min, median, max) for writing gt/lt thresholds. Counts are documents, not values: a document with \`topics: [a, b]\` counts once for each.
+
+Every value reported here can be matched with \`{key, operator: 'eq', value}\` under the same collections.`,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: z.object({
+        collections: z.array(z.string()).optional().describe("Restrict to these collections (default: the same collections query searches)"),
+        key: z.string().optional().describe("Glob over key names (picomatch). 'topics' matches exactly that key, 'mem-*' a family. Default: every key"),
+        value: z.string().optional().describe("Glob over values in text form (numbers as digits, booleans as true/false). Default: every value"),
+        filter: z.record(z.string(), z.unknown()).optional().describe(
+          "Count only documents matching this metadata filter. Same recursive AST as the query tool's 'filter'. " +
+          "Example: {\"key\":\"status\",\"operator\":\"eq\",\"value\":\"published\"}"
+        ),
+        limit: z.number().int().positive().optional().default(10).describe("Values shown per key (default: 10). 'remaining' reports how many were left out"),
+        sort: z.enum(["count", "value"]).optional().default("count").describe("Order values by document count descending (default) or by value ascending"),
+        minCount: z.number().int().positive().optional().default(1).describe("Hide values held by fewer documents than this (default: 1)"),
+      }),
+    },
+    track(async ({ collections, key, value, filter, limit, sort, minCount }) => {
+      const filterValidation = validateFilterArgument(filter);
+      if (filterValidation.error) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${filterValidation.error}` }],
+          isError: true,
+        };
+      }
+
+      const effectiveCollections = collections ?? defaultCollectionNames;
+      const result = await store.listMetadata({
+        collection: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+        key,
+        value,
+        filter: filterValidation.filter,
+        limit,
+        sort,
+        minCount,
+      });
+
+      const text = result.keys.length === 0
+        ? "No metadata matches. Call without key/value/filter to see every key, or check the status tool for collections with metadata."
+        : formatMetadataKeySummaries(result, { showCollections: effectiveCollections.length !== 1, limitHint: "a higher 'limit'" });
+
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: result,
       };
     })
   );
@@ -1100,6 +1188,66 @@ export async function startMcpHttpServer(
         nodeRes.writeHead(200, { "Content-Type": "application/json" });
         nodeRes.end(JSON.stringify({ results: formatted }));
         log(`${ts()} POST /query ${params.searches.length} queries (${Date.now() - reqStart}ms)`);
+        return;
+      }
+
+      // REST endpoint: POST /metadata — metadata discovery, same body as the metadata tool
+      if (pathname === "/metadata" && nodeReq.method === "POST") {
+        const rawBody = await collectBody(nodeReq);
+        let parsedParams: unknown;
+        try {
+          parsedParams = rawBody.trim() === "" ? {} : JSON.parse(rawBody);
+        } catch {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+        if (typeof parsedParams !== "object" || parsedParams === null || Array.isArray(parsedParams)) {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "JSON body must be an object" }));
+          return;
+        }
+        const params = parsedParams as Record<string, unknown>;
+
+        // Optional metadata filter — must be an object and a valid filter AST
+        let restFilter: MetadataFilter | undefined;
+        if (params.filter !== undefined) {
+          if (typeof params.filter !== "object" || params.filter === null || Array.isArray(params.filter)) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Invalid field: filter (must be an object)" }));
+            return;
+          }
+          const filterValidation = validateFilterArgument(params.filter);
+          if (filterValidation.error) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: filterValidation.error }));
+            return;
+          }
+          restFilter = filterValidation.filter;
+        }
+
+        if (params.sort !== undefined && params.sort !== "count" && params.sort !== "value") {
+          nodeRes.writeHead(400, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Invalid field: sort (must be 'count' or 'value')" }));
+          return;
+        }
+
+        // Use default collections if none specified
+        const effectiveCollections = Array.isArray(params.collections) ? params.collections.map(String) : defaultCollectionNames;
+
+        const result = await store.listMetadata({
+          collection: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+          key: typeof params.key === "string" ? params.key : undefined,
+          value: typeof params.value === "string" ? params.value : undefined,
+          filter: restFilter,
+          limit: typeof params.limit === "number" ? params.limit : undefined,
+          sort: params.sort,
+          minCount: typeof params.minCount === "number" ? params.minCount : undefined,
+        });
+
+        nodeRes.writeHead(200, { "Content-Type": "application/json" });
+        nodeRes.end(JSON.stringify(result));
+        log(`${ts()} POST /metadata ${result.keys.length} keys (${Date.now() - reqStart}ms)`);
         return;
       }
 
