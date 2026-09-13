@@ -4311,8 +4311,9 @@ export async function searchVec(db: Database, query: string, model: string, limi
   const hashSeqs = vecResults.map(r => r.hash_seq);
   const distanceMap = new Map(vecResults.map(r => [r.hash_seq, r.distance]));
 
-  // Build query for document lookup
-  const placeholders = hashSeqs.map(() => '?').join(',');
+  // One binding for candidate IDs leaves room for a valid near-ceiling
+  // metadata filter under Node's 32,766-variable limit. The same lookup
+  // serves exact scans and the capped global fallback.
   let docSql = `
     SELECT
       cv.hash || '_' || cv.seq as hash_seq,
@@ -4327,9 +4328,9 @@ export async function searchVec(db: Database, query: string, model: string, limi
     JOIN documents d ON d.hash = cv.hash AND d.active = 1
     JOIN content ON content.hash = d.hash
     LEFT JOIN document_metadata dm ON dm.document_id = d.id
-    WHERE cv.hash || '_' || cv.seq IN (${placeholders})
+    WHERE cv.hash || '_' || cv.seq IN (SELECT value FROM json_each(?))
   `;
-  const params: (string | number)[] = [...hashSeqs];
+  const params: (string | number)[] = [JSON.stringify(hashSeqs)];
 
   if (collectionFilter) {
     docSql += ` AND d.collection = ?`;

@@ -208,7 +208,7 @@ qmd search "authentication" --filter '{"field":"status","operator":"eq","value":
 qmd query "dependency injection" --filter '{"operator":"and","operands":[{"field":"topics","operator":"all","value":["typescript"]},{"field":"status","operator":"nin","value":["draft","archived"]}]}'
 ```
 
-Nodes are discriminated by `operator`: groups `and`/`or` take `operands`, `not` takes one `operand`, and conditions take `field` + `value` with operators `eq`/`ne`/`gt`/`gte`/`lt`/`lte` (comparison), `in`/`nin`/`all` (membership), or `exists` (presence). Matching is typed and exact; missing keys do not match `ne`/`nin` (add an `exists: false` branch in an `or` group to include them). The MCP `query` tool accepts the same AST as a `filter` object. JSON output includes each result's `metadata`.
+Nodes are discriminated by `operator`: groups `and`/`or` take `operands`, `not` takes one `operand`, and conditions take `field` + `value` with operators `eq`/`ne`/`gt`/`gte`/`lt`/`lte` (comparison), `in`/`nin`/`all` (membership), `contains`/`prefix`/`suffix` (text), `type` (the value is a `string`, `number`, or `boolean`), or `exists` (presence). Matching is typed and exact; missing keys do not match `ne`/`nin` (add an `exists: false` branch in an `or` group to include them). Conditions with a string value may add `"caseInsensitive": true`, which folds ASCII letters. The MCP `query` tool accepts the same AST as a `filter` object. JSON output includes each result's `metadata`.
 
 ## MCP Tool: `query`
 

@@ -22,7 +22,7 @@ import {
 } from "../src/store.js";
 import { replaceDocumentMetadata, syncDocumentMetadata } from "../src/metadata-store.js";
 import { METADATA_EXTRACTION_VERSION, type DocumentMetadata } from "../src/metadata.js";
-import type { MetadataFilter } from "../src/metadata-filter.js";
+import { parseMetadataFilter, type MetadataFilter } from "../src/metadata-filter.js";
 
 let testDir: string;
 let store: Store;
@@ -186,6 +186,37 @@ describe("searchVec with metadata filter", () => {
     );
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/far-published.md"]);
     expect(filtered[0]!.metadata).toEqual({ status: "published" });
+  });
+
+  test("a near-ceiling filter fits both vector lookup paths and still excludes shared nonmatching copies", async () => {
+    store.ensureVecTable(3);
+    const body = "# Book\n\nDeterministic vector fixture";
+    const { hash } = await insertDoc("notes", "published.md", body, { eligible: true });
+    await insertDoc("notes", "draft-copy.md", body, { eligible: false });
+    const timestamp = new Date().toISOString();
+
+    store.db.transaction(() => {
+      for (let sequence = 0; sequence < 20_000; sequence++) {
+        insertEmbedding(store.db, hash, sequence, 0, new Float32Array([1, sequence / 20_001, 0]), model, timestamp, 20_001);
+      }
+    })();
+
+    // 256 nodes, 64 distinct members per wide leaf: a valid filter with
+    // 31,490 bindings. Candidate IDs must not exhaust the remaining budget.
+    const members = Array.from({ length: 64 }, (_, index) => `value-${index}`);
+    const leaves = Array.from({ length: 246 }, () => ({ field: "absent", operator: "all", value: members }));
+    const groups = Array.from({ length: 8 }, (_, index) => ({ operator: "or", operands: leaves.slice(index * 32, (index + 1) * 32) }));
+    const metadataFilter = parseMetadataFilter({ operator: "or", operands: [{ field: "eligible", operator: "eq", value: true }, ...groups] });
+
+    // At 20,000 eligible chunks the exact path returns up to limit * 3 IDs.
+    const exactResults = await searchVec(store.db, "q", model, 500, "notes", undefined, queryEmbedding, undefined, metadataFilter);
+    expect(exactResults.map(result => result.displayPath)).toEqual(["notes/published.md"]);
+
+    // The extra chunk crosses into capped global lookup. Its 4,096 candidate
+    // IDs used to push the final document lookup past Node's variable limit.
+    insertEmbedding(store.db, hash, 20_000, 0, new Float32Array([1, 1, 0]), model, timestamp, 20_001);
+    const fallbackResults = await searchVec(store.db, "q", model, 137, "notes", undefined, queryEmbedding, undefined, metadataFilter);
+    expect(fallbackResults.map(result => result.displayPath)).toEqual(["notes/published.md"]);
   });
 
   test("returns empty when no documents are eligible", async () => {
