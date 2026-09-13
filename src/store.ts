@@ -44,7 +44,9 @@ import {
   syncDocumentMetadata,
   countDocumentsPendingMetadata,
   getMetadataByFilepath,
+  listMetadataKeys,
   parseMetadataJson,
+  type MetadataKeyOverview,
 } from "./metadata-store.js";
 
 // =============================================================================
@@ -2528,6 +2530,8 @@ export type CollectionInfo = {
   pattern: string | null;
   documents: number;
   lastUpdated: string;
+  /** Metadata keys declared in this collection with coverage and types, by coverage. */
+  metadataKeys: MetadataKeyOverview[];
 };
 
 export type IndexStatus = {
@@ -5260,6 +5264,7 @@ export function getStatus(db: Database, model: string = DEFAULT_EMBED_MODEL): In
       pattern: config?.pattern ?? null,
       documents: row.active_count,
       lastUpdated: row.last_doc_update || new Date().toISOString(),
+      metadataKeys: listMetadataKeys(db, [row.name]),
     };
   });
 

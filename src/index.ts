@@ -83,6 +83,16 @@ import {
   type MetadataCondition,
 } from "./metadata-filter.js";
 import {
+  listMetadata as storeListMetadata,
+  type ListMetadataOptions,
+  type ListMetadataResult,
+  type MetadataKeySummary,
+  type MetadataKeyTypeSummary,
+  type MetadataValueCount,
+  type MetadataKeyOverview,
+  type MetadataValueType,
+} from "./metadata-store.js";
+import {
   setConfigSource,
   loadConfig,
   addCollection as collectionsAddCollection,
@@ -135,6 +145,17 @@ export type {
   MetadataCondition,
 };
 export { parseMetadataFilter, MetadataFilterError };
+
+// Re-export metadata discovery types (listMetadata() and status metadata keys)
+export type {
+  ListMetadataOptions,
+  ListMetadataResult,
+  MetadataKeySummary,
+  MetadataKeyTypeSummary,
+  MetadataValueCount,
+  MetadataKeyOverview,
+  MetadataValueType,
+};
 
 // Re-export the internal Store type for advanced consumers
 export type { InternalStore };
@@ -302,6 +323,14 @@ export interface QMDStore {
 
   /** List all collections with document stats */
   listCollections(): Promise<{ name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null; includeByDefault: boolean }[]>;
+
+  /**
+   * Discover metadata keys, types, and value counts across the documents in
+   * scope. `key` and `value` are picomatch patterns selecting where to look;
+   * `filter` selects which documents are counted. Every value reported is
+   * one an `eq` filter can match under the same scope.
+   */
+  listMetadata(options?: ListMetadataOptions): Promise<ListMetadataResult>;
 
   /** Get names of collections included by default in queries */
   getDefaultCollectionNames(): Promise<string[]>;
@@ -510,6 +539,10 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
       return result;
     },
     listCollections: async () => storeListCollections(db),
+    listMetadata: async (opts) => storeListMetadata(db, {
+      ...opts,
+      filter: opts?.filter === undefined ? undefined : parseMetadataFilter(opts.filter),
+    }),
     getDefaultCollectionNames: async () => {
       const collections = storeListCollections(db);
       return collections.filter(c => c.includeByDefault).map(c => c.name);

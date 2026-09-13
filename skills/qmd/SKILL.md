@@ -210,6 +210,21 @@ qmd query "dependency injection" --filter '{"operator":"and","operands":[{"key":
 
 Nodes are discriminated by `operator`: groups `and`/`or` take `operands`, `not` takes one `operand`, and conditions take `key` + `value` with operators `eq`/`ne`/`gt`/`gte`/`lt`/`lte` (comparison), `in`/`nin`/`all` (membership), or `exists` (presence). Matching is typed and exact; missing keys do not match `ne`/`nin` (add an `exists: false` branch in an `or` group to include them). The MCP `query` tool accepts the same AST as a `filter` object. JSON output includes each result's `metadata`.
 
+## Discover metadata before filtering
+
+Do not guess keys or values. `qmd collection show <name>` lists the top keys with types and a value preview, and `qmd collection metadata` drills in. `--key` and `--value` are globs that pick where to look, and `--filter` picks which documents are counted:
+
+```bash
+qmd collection metadata notes                          # every key, ten values each
+qmd collection metadata notes --key topics             # one key: coverage, distinct count, top values
+qmd collection metadata notes --value docs-team        # reverse lookup: which keys hold this value
+qmd collection metadata notes --key topics --filter '{"key":"status","operator":"eq","value":"published"}'
+```
+
+Read the header first: `topics  string[]  388 of 480 documents  1,204 distinct` tells you coverage and cardinality before you commit to a filter, and with `--filter` it tells you how many documents pass. Counts are documents, not values. A `N more values, use -n <num> or --all` footer means the list was cut. Raise `-n` rather than assuming the rest. Numbers print `min`, `median`, and `max` so you can write a `gt`/`lt` threshold in one call. A key shown as `number | string` means documents disagree on type. Metadata is validated per document, so this happens within a single collection as readily as across collections. Each type reports its own document count. Filter by the type that covers the documents you want. Every value shown can be matched with `eq` under the same collection scope.
+
+Over MCP, call the `metadata` tool (same options, `collections` as an array) and read `remaining` and `range` from the structured result. The `status` tool lists each collection's key names and types, so check it first.
+
 ## MCP Tool: `query`
 
 When using the MCP server, prefer structured searches:

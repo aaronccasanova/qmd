@@ -86,7 +86,15 @@ import {
   type ReindexResult,
   type ChunkStrategy,
 } from "../store.js";
-import { syncDocumentMetadata, countDocumentsPendingMetadata } from "../metadata-store.js";
+import {
+  syncDocumentMetadata,
+  countDocumentsPendingMetadata,
+  countDocumentsWithMetadata,
+  listMetadata,
+  listMetadataKeys,
+  type ListMetadataOptions,
+} from "../metadata-store.js";
+import { formatMetadataKeySummaries, formatMetadataOverview } from "../metadata-format.js";
 import type { DocumentMetadata } from "../metadata.js";
 import { parseMetadataFilter, type MetadataFilter } from "../metadata-filter.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
@@ -573,6 +581,10 @@ async function showStatus(): Promise<void> {
   }
   if (needsEmbedding > 0) {
     console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'qmd embed')`);
+  }
+  const metadataKeys = listMetadataKeys(db);
+  if (metadataKeys.length > 0) {
+    console.log(`  Metadata: ${metadataKeys.length} keys across ${countDocumentsWithMetadata(db)} files (explore with 'qmd collection metadata')`);
   }
   const pendingMetadata = countDocumentsPendingMetadata(db);
   if (pendingMetadata > 0) {
@@ -1811,11 +1823,38 @@ function collectionList(): void {
       console.log(`  ${c.dim}Ignore:${c.reset}   ${yamlColl.ignore.join(', ')}`);
     }
     console.log(`  ${c.dim}Files:${c.reset}    ${coll.active_count}`);
+    const metadataKeys = listMetadataKeys(db, [coll.name]);
+    if (metadataKeys.length > 0) {
+      const shownKeys = metadataKeys.slice(0, COLLECTION_LIST_METADATA_KEYS).map(overview => overview.key);
+      const hiddenKeys = metadataKeys.length - shownKeys.length;
+      console.log(`  ${c.dim}Metadata:${c.reset} ${shownKeys.join(', ')}${hiddenKeys > 0 ? `, +${hiddenKeys} more` : ''}`);
+    }
     console.log(`  ${c.dim}Updated:${c.reset}  ${timeAgo}`);
     console.log();
   }
 
   closeDb();
+}
+
+/** Key names shown on `collection list`, and keys detailed on `collection show`. */
+const COLLECTION_LIST_METADATA_KEYS = 5;
+
+// The Metadata section of `collection show`: top keys by coverage with a
+// value preview, and a pointer at the drill-down for the rest.
+function collectionShowMetadata(name: string): void {
+  const db = getDb();
+  const result = listMetadata(db, { collection: name, limit: 3 });
+  const documentsWithMetadata = countDocumentsWithMetadata(db, [name]);
+  const pendingMetadata = countDocumentsPendingMetadata(db, [name]);
+  closeDb();
+
+  console.log(formatMetadataOverview(result, {
+    documentsWithMetadata,
+    pendingMetadata,
+    keyLimit: COLLECTION_LIST_METADATA_KEYS,
+    drillDownHint: `qmd collection metadata ${name}`,
+    colors: c,
+  }));
 }
 
 /** Canonical --mask, with --glob as the alias OpenClaw and others already pass (#536). */
@@ -1914,6 +1953,80 @@ function collectionRename(oldName: string, newName: string): void {
 
   console.log(`${c.green}✓${c.reset} Renamed collection '${oldName}' to '${newName}'`);
   console.log(`  Virtual paths updated: ${c.cyan}qmd://${oldName}/${c.reset} → ${c.cyan}qmd://${newName}/${c.reset}`);
+}
+
+// Metadata discovery drill-down. Collection names are already validated;
+// an empty list means the default collections resolved to nothing, which
+// the store reads as "every collection" exactly as search does.
+function collectionMetadata(collectionNames: string[], options: ListMetadataOptions): void {
+  const db = getDb();
+
+  if (listCollections(db).length === 0) {
+    console.log("No collections found. Run 'qmd collection add .' to create one.");
+    closeDb();
+    return;
+  }
+
+  // Discovery always applies the extraction gate, filter or not.
+  warnPendingMetadata(db);
+
+  const result = listMetadata(db, { ...options, collection: collectionSearchFilter(collectionNames) });
+  closeDb();
+
+  if (result.keys.length === 0) {
+    const selection = options.key || options.value || options.filter;
+    console.log(selection
+      ? `${c.dim}No metadata matches. Run 'qmd collection metadata' without patterns to see every key.${c.reset}`
+      : `${c.dim}No metadata found. Add qmd.metadata frontmatter and run 'qmd update'.${c.reset}`);
+    return;
+  }
+
+  console.log(formatMetadataKeySummaries(result, {
+    showCollections: collectionNames.length !== 1,
+    limitHint: "-n <num> or --all",
+    colors: c,
+  }));
+}
+
+// Parse the discovery-specific flags; exits with usage on a bad value.
+function parseCliMetadataOptions(values: Record<string, unknown>): ListMetadataOptions {
+  const options: ListMetadataOptions = {
+    filter: parseCliMetadataFilter(values.filter),
+  };
+
+  if (typeof values.key === "string" && values.key.length > 0) options.key = values.key;
+  if (typeof values.value === "string" && values.value.length > 0) options.value = values.value;
+
+  if (values.all) {
+    options.limit = Infinity;
+  } else if (values.n !== undefined) {
+    options.limit = parsePositiveInteger(values.n, "-n");
+  }
+
+  if (values["min-count"] !== undefined) {
+    options.minCount = parsePositiveInteger(values["min-count"], "--min-count");
+  }
+
+  if (values.sort !== undefined) {
+    if (values.sort !== "count" && values.sort !== "value") {
+      console.error(`Invalid --sort value: ${String(values.sort)}`);
+      console.error("Valid: count, value");
+      process.exit(1);
+    }
+    options.sort = values.sort;
+  }
+
+  return options;
+}
+
+function parsePositiveInteger(raw: unknown, flag: string): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    console.error(`Invalid ${flag} value: ${String(raw)}`);
+    console.error(`${flag} must be a positive integer`);
+    process.exit(1);
+  }
+  return parsed;
 }
 
 async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false, ignorePatterns?: string[]): Promise<void> {
@@ -3112,7 +3225,12 @@ function parseCLI() {
       json: { type: "boolean" },
       explain: { type: "boolean" },
       collection: { type: "string", short: "c", multiple: true },  // Filter by collection(s)
-      filter: { type: "string" },  // Metadata filter (JSON AST) for search/vsearch/query
+      filter: { type: "string" },  // Metadata filter (JSON AST) for search/vsearch/query/collection metadata
+      // Metadata discovery options (collection metadata)
+      key: { type: "string" },  // picomatch pattern over metadata keys
+      value: { type: "string" },  // picomatch pattern over metadata values
+      sort: { type: "string" },  // count (default) | value
+      "min-count": { type: "string" },  // drop values held by fewer documents
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
@@ -3652,6 +3770,7 @@ function showHelp(): void {
   console.log("");
   console.log("Collections & context:");
   console.log("  qmd collection add/list/remove/rename/show   - Manage indexed folders");
+  console.log("  qmd collection metadata [name] [--key K]     - Discover metadata keys and values to filter on");
   console.log("  qmd context add/list/rm                      - Attach human-written summaries");
   console.log("  qmd ls [collection[/path]]                   - Inspect indexed files");
   console.log("");
@@ -4644,6 +4763,16 @@ if (isMain) {
             const ctxCount = Object.keys(col.context).length;
             console.log(`  Contexts: ${ctxCount}`);
           }
+          collectionShowMetadata(name);
+          break;
+        }
+
+        case "metadata": {
+          // Positional names are optional; omitted means the default
+          // collections, as an unscoped search does.
+          const rawNames = cli.args.length > 1 ? cli.args.slice(1) : undefined;
+          const collectionNames = resolveCollectionFilter(rawNames, true);
+          collectionMetadata(collectionNames, parseCliMetadataOptions(cli.values));
           break;
         }
 
@@ -4657,6 +4786,11 @@ if (isMain) {
           console.log("  remove <name>             Remove a collection");
           console.log("  rename <old> <new>        Rename a collection");
           console.log("  show <name>               Show collection details");
+          console.log("  metadata [name...]        Discover metadata keys, types, and value counts");
+          console.log("    --key <pattern>         Select keys (glob), --value <pattern> selects values");
+          console.log("    --filter <json>         Count only documents matching a metadata filter");
+          console.log("    -n <num> | --all        Values shown per key (default 10)");
+          console.log("    --sort count|value      Value order (default count), --min-count <n> drops the tail");
           console.log("  update-cmd <name> [cmd]   Set pre-update command (e.g., 'git pull')");
           console.log("  include <name>            Include in default queries");
           console.log("  exclude <name>            Exclude from default queries");
@@ -4666,6 +4800,8 @@ if (isMain) {
           console.log("  qmd collection add ~/notes --name notes --mask 'a.md,journals/*.md'");
           console.log("  qmd collection update-cmd brain 'git pull'");
           console.log("  qmd collection exclude archive");
+          console.log("  qmd collection metadata notes --key topics");
+          console.log("  qmd collection metadata notes --key topics --filter '{\"key\":\"status\",\"operator\":\"eq\",\"value\":\"published\"}'");
           process.exit(0);
         }
 

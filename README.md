@@ -152,6 +152,7 @@ runs in a container and a liveness probe connects from a non-loopback address.
 The HTTP server exposes two endpoints:
 - `POST /mcp` — MCP Streamable HTTP (JSON responses, stateless)
 - `POST /query` (alias `/search`) — structured search without the MCP protocol. Accepts the same optional `filter` object as the `query` tool (invalid filters return `400`); see [Metadata Filtering](#metadata-filtering)
+- `POST /metadata` — metadata discovery without the MCP protocol. Same body as the `metadata` tool (invalid filters return `400`); see [Metadata Discovery](#metadata-discovery)
 - `GET /health` — liveness check with uptime
 
 
@@ -198,6 +199,13 @@ Point any MCP client at `http://localhost:8181/mcp` to connect.
 | `get` | `maxLines` | number | Limit returned lines |
 | `get` | `lineNumbers` | boolean | Prefix lines with numbers (default **true**) |
 | `multi_get` | `pattern` | string | Glob pattern or comma-separated list |
+| `metadata` | `collections` | string[] | Restrict discovery to collection names (default: the collections `query` searches) |
+| `metadata` | `key` | string | Glob over metadata key names (`topics` exact, `mem-*` a family) |
+| `metadata` | `value` | string | Glob over values in text form (reverse lookup: which keys hold this value) |
+| `metadata` | `filter` | object | Count only documents matching this filter (same AST as `query`) |
+| `metadata` | `limit` | number | Values shown per key (default 10). `remaining` reports the rest |
+| `metadata` | `sort` | string | `count` (default) or `value` |
+| `metadata` | `minCount` | number | Hide values held by fewer documents (default 1) |
 | `multi_get` | `maxBytes` | number | Skip files larger than N (default 10240) |
 | `multi_get` | `maxLines` | number | Limit lines per file |
 | `multi_get` | `lineNumbers` | boolean | Prefix lines with numbers (default **true**) |
@@ -644,8 +652,13 @@ qmd collection rename myproject my-project
 qmd ls notes
 qmd ls notes/subfolder
 
-# Show collection details (path, glob mask, include status, context count)
+# Show collection details (path, glob mask, include status, context count, top metadata keys)
 qmd collection show notes
+
+# Discover metadata keys, types, and value counts (see Metadata Discovery)
+qmd collection metadata notes
+qmd collection metadata notes --key topics
+qmd collection metadata notes --key topics --filter '{"key":"status","operator":"eq","value":"published"}'
 
 # Include or exclude a collection from default (unscoped) queries
 qmd collection include notes
@@ -984,6 +997,140 @@ Guarantees and limits:
 - Filtered search only considers documents whose metadata has been extracted (run `qmd update` after upgrading; `qmd status` shows the pending count).
 
 JSON output (`--format json`), the SDK, MCP structured results, and the HTTP endpoints include each result's indexed metadata.
+
+### Metadata Discovery
+
+Filtering is only useful if you know what to filter on. Discovery reports the metadata keys, types, and value counts already in the index, turning "what dimensions exist" into a well-shaped filter in a few steps. It reads the same tables filtering reads: no re-indexing, and every value it reports is one an `eq` filter can match.
+
+The mental model has two halves. `--key` and `--value` are glob patterns (picomatch, as `multi-get` uses) that select **where to look** in the key/value space. `--filter` selects **which documents are counted**. They compose:
+
+| `--key` | `--value` | Question answered |
+|---------|-----------|-------------------|
+| | | Which keys exist, with a window of values each |
+| `topics` | | Everything about one key |
+| `mem-*` | | Which keys look like this |
+| | `docs-team` | Which keys hold this value |
+| | `2025-*` | Which keys hold values shaped like this |
+| `topics` | `type*` | Values of one key matching a pattern |
+
+Start wide and narrow:
+
+```sh
+# Which keys does this collection use? (also shown by `qmd collection show notes`)
+qmd collection metadata notes
+
+# Everything about one key: coverage, distinct count, top values
+qmd collection metadata notes --key topics
+
+# Reverse lookup: which keys hold this value
+qmd collection metadata notes --value docs-team
+
+# What remains after a filter, before committing to it in a query
+qmd collection metadata notes --key topics --filter '{"key":"status","operator":"eq","value":"published"}'
+
+# Then search with the filter you just validated
+qmd query "dependency injection" -c notes --filter '{
+  "operator": "and",
+  "operands": [
+    { "key": "status", "operator": "eq", "value": "published" },
+    { "key": "topics", "operator": "all", "value": ["typescript"] }
+  ]
+}'
+```
+
+The drill-down prints one block per key, in coverage order:
+
+```sh
+qmd collection metadata notes
+```
+
+```
+topics  string[]  388 of 480 documents  1,204 distinct
+  typescript    140
+  sqlite         92
+  search         77
+  architecture   61
+  sqlite-vec     44
+  mcp            39
+  embeddings     35
+  agents         31
+  cli            28
+  testing        26
+1,194 more values, use -n <num> or --all
+
+priority  number  205 of 480 documents  5 distinct
+  min 1  median 3  max 5
+  1 (12)  2 (40)  3 (88)  4 (50)  5 (15)
+
+reviewed  boolean  480 of 480 documents
+  true 61  false 419
+```
+
+A reverse lookup answers "where does this value live" by returning every key that holds it, here a scalar key and an array key:
+
+```sh
+qmd collection metadata notes --value docs-team
+```
+
+```
+owner  string  212 of 480 documents  1 distinct
+  docs-team  212
+
+reviewers  string[]  97 of 480 documents  1 distinct
+  docs-team  97
+```
+
+Options: `-n <num>`/`--all` size the value window (default 10), `--sort count|value` orders it (count descending by default, value ascending for ranges and dates), and `--min-count <n>` drops the long tail. Omitting the collection name covers the default collections, exactly as an unscoped search does.
+
+Rules that matter when reading the output:
+
+- **Counts are documents, not values.** A document with `topics: [a, b]` contributes one to each. Coverage is "documents declaring this key".
+- **Truncation is never silent.** Every capped list ends with the remainder and the flag that removes the cap. Structured results carry it as `remaining`.
+- **Numbers report min, median, and max**, plus the enumerated values when they fit, which is enough to write a sound `gt`/`lt` threshold in one call.
+- **Discovery sees exactly what filtering sees.** Same extraction gate, same active-document rule, same collection scope. Documents still pending extraction are reported on stderr and excluded until `qmd update` runs.
+- **Type conflicts are reported, not resolved.** Metadata is validated one document at a time. Nothing requires two documents to agree on a key's type, whether they sit in the same collection or in different ones, so `priority: 3` in one file and `priority: high` in another both index. Discovery splits such a key by type and gives each type its own document count, which tells you how much of the corpus a typed filter would reach. Within one collection:
+
+```sh
+qmd collection metadata work --key priority
+```
+
+```
+priority  number | string  1,222 of 1,620 documents
+  number     18 docs  min 1  median 2  max 3
+  string  1,204 docs  high (700), medium (380), low (124)
+```
+
+Across collections, each type also names where it comes from:
+
+```sh
+qmd collection metadata --key priority
+```
+
+```
+priority  number | string  1,427 of 2,100 documents
+  number    223 docs  min 1  median 3  max 5               notes, work
+  string  1,204 docs  high (700), medium (380), low (124)  work
+```
+
+`qmd collection list` names each collection's top keys, `qmd collection show <name>` details the top five with a value preview, and `qmd status` summarizes how many keys and files carry metadata.
+
+The same discovery is available on every surface with the same options (`collection`, `key`, `value`, `filter`, `limit`, `sort`, `minCount`) and the same result shape:
+
+```typescript
+// SDK: one flat result, keys in coverage order, each split per type
+const discovery = await store.listMetadata({ collection: "notes", key: "topics", limit: 5 })
+discovery.documents            // active documents in scope (the denominator)
+discovery.keys[0].types[0]     // { type, multiValued, documents, distinctValues, values, remaining, range?, collections }
+
+// Narrowed by a filter: how many documents pass, and what is left to filter on
+const published = await store.listMetadata({
+  collection: "notes",
+  filter: { key: "status", operator: "eq", value: "published" },
+})
+published.filteredDocuments
+```
+
+The MCP `metadata` tool takes the same options with `collections` spelled as on `query`, returns the CLI shape as text and the result as `structuredContent`, and the MCP `status` tool lists each collection's key names and types so an agent's first call reveals that metadata exists. `POST /metadata` accepts the same body as the tool and returns the same result (`400` on an invalid filter).
 
 ### Output Format
 

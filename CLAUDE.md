@@ -9,6 +9,7 @@ qmd collection add . --name <n>   # Create/index collection
 qmd collection list               # List all collections with details
 qmd collection remove <name>      # Remove a collection by name
 qmd collection rename <old> <new> # Rename a collection
+qmd collection metadata [name...] # Discover metadata keys, types, and value counts (--key, --value, --filter)
 qmd init                          # Create a project-local .qmd index
 qmd ls [collection[/path]]        # List collections or files in a collection
 qmd context add [path] "text"     # Add context for path (defaults to current dir)
@@ -47,8 +48,14 @@ qmd collection remove mynotes
 # Rename a collection
 qmd collection rename mynotes my-notes
 
-# Show collection details
+# Show collection details, including the top metadata keys
 qmd collection show mynotes
+
+# Discover metadata keys and values to filter on
+qmd collection metadata mynotes
+qmd collection metadata mynotes --key topics
+qmd collection metadata mynotes --value docs-team
+qmd collection metadata mynotes --key topics --filter '{"key":"status","operator":"eq","value":"published"}'
 
 # Set or clear the pre-update hook (runs before re-indexing on `qmd update`)
 qmd collection update-cmd mynotes 'git pull --ff-only'
