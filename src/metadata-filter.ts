@@ -1,49 +1,67 @@
 /**
- * QMD Metadata Filter - Recursive filter AST, strict runtime validation, and
- * parameterized SQL compilation.
+ * QMD Metadata Filter - Recursive predicate AST, strict runtime validation,
+ * and parameterized SQL compilation.
  *
- * The filter has one canonical, `operator`-discriminated recursive shape shared
- * by every public search surface (CLI, SDK, MCP, HTTP):
+ * The predicate has one canonical, `operator`-discriminated recursive shape
+ * shared by every public search surface (CLI, SDK, MCP, HTTP):
  *
  *   { "operator": "and", "operands": [ ... ] }
  *   { "operator": "not", "operand": { ... } }
  *   { "field": "status", "operator": "eq", "value": "published" }
+ *   { "field": "topics", "operator": "prefix", "value": "sql", "caseInsensitive": true }
  *
- * A condition is a predicate over one field of the record under evaluation:
- * `field` names it, `operator` says how to compare, `value` is the operand.
- * For a document, the fields are its metadata keys.
+ * A condition tests one field of the record under evaluation, named by `field`,
+ * against `value` using `operator`. For a document the fields are its metadata
+ * keys. Comparison, membership, and text operators are typed by their operand:
+ * a string operand only ever compares against string values, a number against
+ * numbers, a boolean against booleans, and a mismatch never matches.
  *
  * Compilation emits correlated EXISTS/NOT EXISTS subqueries over
- * `document_metadata_values` with every user value bound as a parameter —
- * metadata keys and values are data, never SQL.
+ * `document_metadata_values` with every user value bound as a parameter.
+ * Metadata keys and values are data, never SQL.
  */
 
-import type { MetadataScalar, MetadataScalarArray } from "./metadata.js";
+import type { MetadataScalar, MetadataScalarArray, MetadataValueType } from "./metadata.js";
 import { METADATA_LIMITS } from "./metadata.js";
 
 // =============================================================================
 // Public types
 // =============================================================================
 
-export type MetadataFilter =
-  | MetadataFilterGroup
-  | MetadataFilterNegation
-  | MetadataCondition;
+/**
+ * The recursive grammar: a condition, or `and`/`or`/`not` over predicates.
+ * `Condition` is the set of conditions the record under evaluation admits.
+ */
+export type MetadataPredicate<Condition> =
+  | Condition
+  | MetadataPredicateGroup<Condition>
+  | MetadataPredicateNegation<Condition>;
 
-export interface MetadataFilterGroup {
+export interface MetadataPredicateGroup<Condition> {
   operator: "and" | "or";
-  operands: readonly MetadataFilter[];
+  operands: readonly MetadataPredicate<Condition>[];
 }
 
-export interface MetadataFilterNegation {
+export interface MetadataPredicateNegation<Condition> {
   operator: "not";
-  operand: MetadataFilter;
+  operand: MetadataPredicate<Condition>;
 }
 
+/** A predicate over a document, whose fields are its metadata keys. */
+export type MetadataFilter = MetadataPredicate<MetadataCondition>;
+export type MetadataFilterGroup = MetadataPredicateGroup<MetadataCondition>;
+export type MetadataFilterNegation = MetadataPredicateNegation<MetadataCondition>;
+
+/**
+ * One condition. `caseInsensitive` folds ASCII letters on both sides and is
+ * accepted only where the operand is a string or an array of strings.
+ */
 export type MetadataCondition =
-  | { field: string; operator: "eq" | "ne"; value: MetadataScalar }
-  | { field: string; operator: "gt" | "gte" | "lt" | "lte"; value: string | number }
-  | { field: string; operator: "in" | "nin" | "all"; value: MetadataScalarArray }
+  | { field: string; operator: "eq" | "ne"; value: MetadataScalar; caseInsensitive?: boolean }
+  | { field: string; operator: "gt" | "gte" | "lt" | "lte"; value: string | number; caseInsensitive?: boolean }
+  | { field: string; operator: "in" | "nin" | "all"; value: MetadataScalarArray; caseInsensitive?: boolean }
+  | { field: string; operator: "contains" | "prefix" | "suffix"; value: string; caseInsensitive?: boolean }
+  | { field: string; operator: "type"; value: MetadataValueType }
   | { field: string; operator: "exists"; value: boolean };
 
 export interface CompiledMetadataFilter {
@@ -80,14 +98,19 @@ const GROUP_OPERATORS = new Set(["and", "or"]);
 const COMPARISON_OPERATORS = new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
 const ORDERED_OPERATORS = new Set(["gt", "gte", "lt", "lte"]);
 const MEMBERSHIP_OPERATORS = new Set(["in", "nin", "all"]);
-const CONDITION_OPERATORS = new Set([...COMPARISON_OPERATORS, ...MEMBERSHIP_OPERATORS, "exists"]);
+const TEXT_OPERATORS = new Set(["contains", "prefix", "suffix"]);
+const CONDITION_OPERATORS = new Set([...COMPARISON_OPERATORS, ...MEMBERSHIP_OPERATORS, ...TEXT_OPERATORS, "type", "exists"]);
 const ALL_OPERATORS = [...GROUP_OPERATORS, "not", ...CONDITION_OPERATORS];
+const VALUE_TYPES: readonly MetadataValueType[] = ["string", "number", "boolean"];
 
 // =============================================================================
 // Validation
 // =============================================================================
 
 type FilterParseState = { nodes: number };
+
+/** Conditions whose operand can be a string, and so can fold case. */
+type CaseFoldableCondition = Exclude<MetadataCondition, { operator: "type" | "exists" }>;
 
 /**
  * Strictly validate an untrusted value as a MetadataFilter.
@@ -179,7 +202,7 @@ function parseFilterNegation(
 }
 
 function parseFilterCondition(node: Record<string, unknown>, operator: string, path: string): MetadataCondition {
-  rejectUnknownProperties(node, ["field", "operator", "value"], path);
+  rejectUnknownProperties(node, ["field", "operator", "value", "caseInsensitive"], path);
 
   const field = node["field"];
   if (typeof field !== "string" || field.length === 0) {
@@ -194,19 +217,39 @@ function parseFilterCondition(node: Record<string, unknown>, operator: string, p
   }
   const value = node["value"];
 
+  const caseInsensitive = node["caseInsensitive"];
+  if (caseInsensitive !== undefined && typeof caseInsensitive !== "boolean") {
+    throw new MetadataFilterError(`${path}.caseInsensitive`, "'caseInsensitive' must be a boolean");
+  }
+
   if (operator === "exists") {
     if (typeof value !== "boolean") {
       throw new MetadataFilterError(`${path}.value`, "'exists' requires a boolean value");
     }
+    rejectCaseInsensitive(caseInsensitive, operator, path);
     return { field, operator, value };
   }
 
+  if (operator === "type") {
+    const valueType = VALUE_TYPES.find(candidate => candidate === value);
+    if (!valueType) {
+      throw new MetadataFilterError(`${path}.value`, `'type' requires one of: ${VALUE_TYPES.join(", ")}`);
+    }
+    rejectCaseInsensitive(caseInsensitive, operator, path);
+    return { field, operator, value: valueType };
+  }
+
+  if (TEXT_OPERATORS.has(operator)) {
+    const text = parseScalarValue(value, `${path}.value`);
+    if (typeof text !== "string" || text.length === 0) {
+      throw new MetadataFilterError(`${path}.value`, `'${operator}' requires a non-empty string value`);
+    }
+    return withCaseFolding({ field, operator: operator as "contains" | "prefix" | "suffix", value: text }, caseInsensitive, path);
+  }
+
   if (MEMBERSHIP_OPERATORS.has(operator)) {
-    return {
-      field,
-      operator: operator as "in" | "nin" | "all",
-      value: parseMembershipValues(value, operator, path),
-    };
+    const values = parseMembershipValues(value, operator, path);
+    return withCaseFolding({ field, operator: operator as "in" | "nin" | "all", value: values }, caseInsensitive, path);
   }
 
   // Comparison operators: eq, ne, gt, gte, lt, lte.
@@ -214,7 +257,26 @@ function parseFilterCondition(node: Record<string, unknown>, operator: string, p
   if (ORDERED_OPERATORS.has(operator) && typeof scalar === "boolean") {
     throw new MetadataFilterError(`${path}.value`, `'${operator}' requires a string or number value`);
   }
-  return { field, operator, value: scalar } as MetadataCondition;
+  return withCaseFolding({ field, operator, value: scalar } as CaseFoldableCondition, caseInsensitive, path);
+}
+
+/** Attach `caseInsensitive` when given, which only string operands accept. */
+function withCaseFolding(condition: CaseFoldableCondition, caseInsensitive: unknown, path: string): MetadataCondition {
+  if (caseInsensitive === undefined) return condition;
+
+  const operand: unknown = condition.value;
+  const isText = typeof operand === "string";
+  const isTextArray = Array.isArray(operand) && operand.every(element => typeof element === "string");
+  if (!isText && !isTextArray) {
+    throw new MetadataFilterError(`${path}.caseInsensitive`, "'caseInsensitive' applies to string values only");
+  }
+
+  return { ...condition, caseInsensitive: caseInsensitive === true };
+}
+
+function rejectCaseInsensitive(caseInsensitive: unknown, operator: string, path: string): void {
+  if (caseInsensitive === undefined) return;
+  throw new MetadataFilterError(`${path}.caseInsensitive`, `'caseInsensitive' does not apply to '${operator}'`);
 }
 
 function parseMembershipValues(value: unknown, operator: string, path: string): MetadataScalarArray {
@@ -302,16 +364,21 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
         ? buildValueExistsSql(alias, "mv.key = ?")
         : `NOT ${buildValueExistsSql(alias, "mv.key = ?")}`;
 
+    case "type":
+      params.push(filter.field, filter.value);
+      return buildValueExistsSql(alias, "mv.key = ? AND mv.value_type = ?");
+
     case "eq":
     case "gt":
     case "gte":
     case "lt":
     case "lte": {
       const sqlOperator = { eq: "=", gt: ">", gte: ">=", lt: "<", lte: "<=" }[filter.operator];
-      params.push(filter.field, bindScalar(filter.value));
+      const columnSql = buildValueColumnSql(filter.value, filter.caseInsensitive);
+      params.push(filter.field, bindOperand(filter.value, filter.caseInsensitive));
       return buildValueExistsSql(
         alias,
-        `mv.key = ? AND mv.value_type = '${valueTypeOf(filter.value)}' AND mv.${valueColumnOf(filter.value)} ${sqlOperator} ?`,
+        `mv.key = ? AND mv.value_type = '${valueTypeOf(filter.value)}' AND ${columnSql} ${sqlOperator} ?`,
       );
     }
 
@@ -319,42 +386,49 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
       // Key must have at least one same-type value, and no same-type value
       // may equal the operand. Missing keys and type mismatches do not match.
       const valueType = valueTypeOf(filter.value);
+      const columnSql = buildValueColumnSql(filter.value, filter.caseInsensitive);
       params.push(filter.field);
       const presentSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}'`);
-      params.push(filter.field, bindScalar(filter.value));
-      const equalSql = buildValueExistsSql(
-        alias,
-        `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${valueColumnOf(filter.value)} = ?`,
-      );
+      params.push(filter.field, bindOperand(filter.value, filter.caseInsensitive));
+      const equalSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND ${columnSql} = ?`);
       return `(${presentSql} AND NOT ${equalSql})`;
     }
 
     case "in":
     case "nin": {
       const valueType = valueTypeOf(filter.value[0]!);
-      const column = valueColumnOf(filter.value[0]!);
+      const columnSql = buildValueColumnSql(filter.value[0]!, filter.caseInsensitive);
       const placeholders = filter.value.map(() => "?").join(", ");
+      const operands = filter.value.map(element => bindOperand(element, filter.caseInsensitive));
 
       if (filter.operator === "in") {
-        params.push(filter.field, ...filter.value.map(bindScalar));
-        return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} IN (${placeholders})`);
+        params.push(filter.field, ...operands);
+        return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND ${columnSql} IN (${placeholders})`);
       }
 
       params.push(filter.field);
       const presentSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}'`);
-      params.push(filter.field, ...filter.value.map(bindScalar));
-      const memberSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} IN (${placeholders})`);
+      params.push(filter.field, ...operands);
+      const memberSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND ${columnSql} IN (${placeholders})`);
       return `(${presentSql} AND NOT ${memberSql})`;
     }
 
     case "all": {
       const valueType = valueTypeOf(filter.value[0]!);
-      const column = valueColumnOf(filter.value[0]!);
+      const columnSql = buildValueColumnSql(filter.value[0]!, filter.caseInsensitive);
       const memberSqls = filter.value.map(element => {
-        params.push(filter.field, bindScalar(element));
-        return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} = ?`);
+        params.push(filter.field, bindOperand(element, filter.caseInsensitive));
+        return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND ${columnSql} = ?`);
       });
       return `(${memberSqls.join(" AND ")})`;
+    }
+
+    case "contains":
+    case "prefix":
+    case "suffix": {
+      params.push(filter.field);
+      const textSql = compileTextTestSql(filter.operator, filter.value, filter.caseInsensitive, params);
+      return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = 'string' AND ${textSql}`);
     }
   }
 }
@@ -363,17 +437,58 @@ function buildValueExistsSql(alias: string, conditionSql: string): string {
   return `EXISTS (SELECT 1 FROM document_metadata_values mv WHERE mv.document_id = ${alias}.id AND ${conditionSql})`;
 }
 
-function valueTypeOf(scalar: MetadataScalar): "string" | "number" | "boolean" {
-  return typeof scalar as "string" | "number" | "boolean";
+/**
+ * Substring tests over the string column. Prefix and suffix compare UTF-8
+ * bytes, with the operand's byte length bound from JavaScript: SQLite's text
+ * `length()` and `substr()` stop at an embedded NUL, and blobs do not. UTF-8
+ * is self-synchronizing, so a byte-prefix (or byte-suffix) of a whole operand
+ * is exactly a character-prefix (or -suffix).
+ */
+function compileTextTestSql(
+  operator: "contains" | "prefix" | "suffix",
+  text: string,
+  caseInsensitive: boolean | undefined,
+  params: (string | number)[],
+): string {
+  const columnSql = buildValueColumnSql(text, caseInsensitive);
+  const operand = caseInsensitive ? foldAsciiCase(text) : text;
+
+  if (operator === "contains") {
+    params.push(operand);
+    return `instr(${columnSql}, ?) > 0`;
+  }
+
+  params.push(utf8ByteLengthOf(operand), operand);
+  return operator === "prefix"
+    ? `substr(CAST(${columnSql} AS BLOB), 1, ?) = CAST(? AS BLOB)`
+    : `substr(CAST(${columnSql} AS BLOB), -?) = CAST(? AS BLOB)`;
 }
 
-function valueColumnOf(scalar: MetadataScalar): "text_value" | "number_value" | "boolean_value" {
-  if (typeof scalar === "string") return "text_value";
-  if (typeof scalar === "number") return "number_value";
-  return "boolean_value";
+const utf8Encoder = new TextEncoder();
+
+function utf8ByteLengthOf(text: string): number {
+  return utf8Encoder.encode(text).byteLength;
 }
 
-function bindScalar(scalar: MetadataScalar): string | number {
+function valueTypeOf(scalar: MetadataScalar): MetadataValueType {
+  return typeof scalar as MetadataValueType;
+}
+
+/** The typed column an operand compares against, folded when the condition ignores case. */
+function buildValueColumnSql(scalar: MetadataScalar, caseInsensitive: boolean | undefined): string {
+  if (typeof scalar === "number") return "mv.number_value";
+  if (typeof scalar === "boolean") return "mv.boolean_value";
+  return caseInsensitive ? "lower(mv.text_value)" : "mv.text_value";
+}
+
+/** Booleans bind as 0/1. Case-insensitive strings bind folded the same way SQLite's `lower()` folds the column. */
+function bindOperand(scalar: MetadataScalar, caseInsensitive: boolean | undefined): string | number {
   if (typeof scalar === "boolean") return scalar ? 1 : 0;
+  if (typeof scalar === "string" && caseInsensitive) return foldAsciiCase(scalar);
   return scalar;
+}
+
+/** SQLite's built-in `lower()` folds ASCII letters only, so the operand is folded over the same range. */
+function foldAsciiCase(text: string): string {
+  return text.replace(/[A-Z]/g, letter => letter.toLowerCase());
 }

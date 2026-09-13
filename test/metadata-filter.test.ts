@@ -33,9 +33,40 @@ describe("parseMetadataFilter", () => {
       { field: "topics", operator: "nin", value: [1, 2] },
       { field: "flags", operator: "all", value: [true, false] },
       { field: "status", operator: "exists", value: false },
+      { field: "topics", operator: "contains", value: "vec" },
+      { field: "topics", operator: "prefix", value: "sql" },
+      { field: "owner", operator: "suffix", value: "-team" },
+      { field: "priority", operator: "type", value: "number" },
     ];
     for (const condition of conditions) {
       expect(parseMetadataFilter(condition)).toEqual(condition);
+    }
+  });
+
+  test("accepts caseInsensitive on string operands only", () => {
+    const accepted: unknown[] = [
+      { field: "status", operator: "eq", value: "Published", caseInsensitive: true },
+      { field: "status", operator: "ne", value: "Draft", caseInsensitive: false },
+      { field: "name", operator: "gt", value: "M", caseInsensitive: true },
+      { field: "topics", operator: "in", value: ["SQL", "TypeScript"], caseInsensitive: true },
+      { field: "topics", operator: "all", value: ["SQL"], caseInsensitive: true },
+      { field: "topics", operator: "contains", value: "SQL", caseInsensitive: true },
+      { field: "topics", operator: "prefix", value: "SQL", caseInsensitive: true },
+      { field: "topics", operator: "suffix", value: "SQL", caseInsensitive: true },
+    ];
+    for (const condition of accepted) {
+      expect(parseMetadataFilter(condition)).toEqual(condition);
+    }
+
+    const rejected: [unknown, RegExp][] = [
+      [{ field: "priority", operator: "eq", value: 3, caseInsensitive: true }, /at \$\.caseInsensitive:.*string values only/],
+      [{ field: "reviewed", operator: "in", value: [true], caseInsensitive: true }, /string values only/],
+      [{ field: "reviewed", operator: "exists", value: true, caseInsensitive: true }, /does not apply to 'exists'/],
+      [{ field: "priority", operator: "type", value: "number", caseInsensitive: true }, /does not apply to 'type'/],
+      [{ field: "status", operator: "eq", value: "x", caseInsensitive: "yes" }, /must be a boolean/],
+    ];
+    for (const [input, expected] of rejected) {
+      expect(() => parseMetadataFilter(input)).toThrow(expected);
     }
   });
 
@@ -83,6 +114,11 @@ describe("parseMetadataFilter", () => {
       [{ operator: "in", field: "a", value: [] }, /non-empty array/],
       [{ operator: "in", field: "a", value: [1, "two"] }, /homogeneous array/],
       [{ operator: "exists", field: "a", value: "yes" }, /boolean value/],
+      [{ operator: "contains", field: "a", value: "" }, /at \$\.value:.*'contains' requires a non-empty string/],
+      [{ operator: "prefix", field: "a", value: 3 }, /'prefix' requires a non-empty string/],
+      [{ operator: "suffix", field: "a", value: ["x"] }, /string, number, or boolean/],
+      [{ operator: "type", field: "a", value: "integer" }, /at \$\.value:.*'type' requires one of: string, number, boolean/],
+      [{ operator: "type", field: "a", value: 1 }, /'type' requires one of/],
     ];
 
     for (const [input, expected] of cases) {
@@ -262,6 +298,93 @@ describe("compileMetadataFilter semantics", () => {
     expect(matchPaths(rangeFilter)).toEqual(["narrow.md", "wide.md"]);
   });
 
+  test("text operators match any string element and never a number or boolean", () => {
+    insertDoc("sqlite.md", { topics: ["sqlite", "search"] });
+    insertDoc("vec.md", { topics: ["sqlite-vec", "embeddings"] });
+    insertDoc("pg.md", { topics: "postgres" });
+    insertDoc("num.md", { topics: 42 });
+    insertDoc("bool.md", { topics: true });
+
+    expect(matchPaths({ field: "topics", operator: "prefix", value: "sql" })).toEqual(["sqlite.md", "vec.md"]);
+    expect(matchPaths({ field: "topics", operator: "suffix", value: "vec" })).toEqual(["vec.md"]);
+    expect(matchPaths({ field: "topics", operator: "contains", value: "arch" })).toEqual(["sqlite.md"]);
+    expect(matchPaths({ field: "topics", operator: "contains", value: "4" })).toEqual([]);
+    expect(matchPaths({ field: "topics", operator: "prefix", value: "tru" })).toEqual([]);
+  });
+
+  test("prefix and suffix compare whole characters and never overrun the value", () => {
+    insertDoc("exact.md", { code: "abc" });
+    insertDoc("emoji.md", { code: "\u{1F600}abc" });
+
+    // The operand equal to the value is both its prefix and its suffix.
+    expect(matchPaths({ field: "code", operator: "prefix", value: "abc" })).toEqual(["exact.md"]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "abc" })).toEqual(["emoji.md", "exact.md"]);
+    // An operand longer than the value cannot match either end.
+    expect(matchPaths({ field: "code", operator: "prefix", value: "abcd" })).toEqual([]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "zabc" })).toEqual([]);
+    // Astral characters count as one character on both sides.
+    expect(matchPaths({ field: "code", operator: "prefix", value: "\u{1F600}a" })).toEqual(["emoji.md"]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "\u{1F600}abc" })).toEqual(["emoji.md"]);
+  });
+
+  test("text operators see the whole value past an embedded NUL", () => {
+    insertDoc("nul.md", { code: "abc\u0000XYZ" });
+    insertDoc("plain.md", { code: "abc" });
+
+    expect(matchPaths({ field: "code", operator: "suffix", value: "XYZ" })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "abc" })).toEqual(["plain.md"]);
+    expect(matchPaths({ field: "code", operator: "prefix", value: "abc\u0000XYZ" })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "abc\u0000XYZ" })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "prefix", value: "abc\u0000" })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "contains", value: "\u0000X" })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "suffix", value: "xyz", caseInsensitive: true })).toEqual(["nul.md"]);
+    expect(matchPaths({ field: "code", operator: "eq", value: "abc\u0000XYZ" })).toEqual(["nul.md"]);
+  });
+
+  test("type matches the stored type of a key's values", () => {
+    insertDoc("num.md", { priority: 3 });
+    insertDoc("nums.md", { priority: [1, 2] });
+    insertDoc("str.md", { priority: "high" });
+    insertDoc("bool.md", { priority: true });
+    insertDoc("none.md", { other: 1 });
+
+    expect(matchPaths({ field: "priority", operator: "type", value: "number" })).toEqual(["num.md", "nums.md"]);
+    expect(matchPaths({ field: "priority", operator: "type", value: "string" })).toEqual(["str.md"]);
+    expect(matchPaths({ field: "priority", operator: "type", value: "boolean" })).toEqual(["bool.md"]);
+    expect(matchPaths({
+      operator: "not",
+      operand: { field: "priority", operator: "type", value: "string" },
+    })).toEqual(["bool.md", "none.md", "num.md", "nums.md"]);
+  });
+
+  test("caseInsensitive folds ASCII letters on both sides for every string operator", () => {
+    insertDoc("upper.md", { status: "PUBLISHED", topics: ["PostgreSQL", "MySQL"] });
+    insertDoc("lower.md", { status: "published", topics: ["sqlite"] });
+    insertDoc("draft.md", { status: "Draft", topics: ["Search"] });
+
+    expect(matchPaths({ field: "status", operator: "eq", value: "Published" })).toEqual([]);
+    expect(matchPaths({ field: "status", operator: "eq", value: "Published", caseInsensitive: true })).toEqual(["lower.md", "upper.md"]);
+    expect(matchPaths({ field: "status", operator: "ne", value: "published", caseInsensitive: true })).toEqual(["draft.md"]);
+    expect(matchPaths({ field: "status", operator: "in", value: ["DRAFT"], caseInsensitive: true })).toEqual(["draft.md"]);
+    expect(matchPaths({ field: "status", operator: "nin", value: ["DRAFT"], caseInsensitive: true })).toEqual(["lower.md", "upper.md"]);
+    expect(matchPaths({ field: "topics", operator: "all", value: ["postgresql", "mysql"], caseInsensitive: true })).toEqual(["upper.md"]);
+    expect(matchPaths({ field: "topics", operator: "contains", value: "sql", caseInsensitive: true })).toEqual(["lower.md", "upper.md"]);
+    expect(matchPaths({ field: "topics", operator: "prefix", value: "postgres", caseInsensitive: true })).toEqual(["upper.md"]);
+    expect(matchPaths({ field: "topics", operator: "suffix", value: "SQL", caseInsensitive: true })).toEqual(["upper.md"]);
+    // Lexical comparison folds too: "Draft" sorts before "published" once lowered.
+    expect(matchPaths({ field: "status", operator: "lt", value: "M", caseInsensitive: true })).toEqual(["draft.md"]);
+  });
+
+  test("caseInsensitive leaves non-ASCII letters exact", () => {
+    insertDoc("upper.md", { city: "\u00C9VORA" });
+    insertDoc("lower.md", { city: "\u00E9vora" });
+
+    // The ASCII part folds and the accented initial does not, so each
+    // spelling matches itself only.
+    expect(matchPaths({ field: "city", operator: "eq", value: "\u00C9vora", caseInsensitive: true })).toEqual(["upper.md"]);
+    expect(matchPaths({ field: "city", operator: "eq", value: "\u00E9VORA", caseInsensitive: true })).toEqual(["lower.md"]);
+  });
+
   test("boolean values round-trip through membership operators", () => {
     insertDoc("flagged.md", { reviewed: true });
     insertDoc("unflagged.md", { reviewed: false });
@@ -289,6 +412,8 @@ describe("compileMetadataFilter semantics", () => {
       operands: [
         { field: "key'; --", operator: "eq", value: "value'; --" },
         { field: "topics", operator: "in", value: ["a'; --"] },
+        { field: "topics", operator: "contains", value: "c'; --" },
+        { field: "topics", operator: "suffix", value: "S'; --", caseInsensitive: true },
       ],
     });
     const compiled = compileMetadataFilter(filter, "d");
@@ -296,5 +421,7 @@ describe("compileMetadataFilter semantics", () => {
     expect(compiled.params).toContain("key'; --");
     expect(compiled.params).toContain("value'; --");
     expect(compiled.params).toContain("a'; --");
+    expect(compiled.params).toContain("c'; --");
+    expect(compiled.params).toContain("s'; --");
   });
 });

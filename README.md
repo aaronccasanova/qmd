@@ -957,6 +957,7 @@ qmd query "dependency injection" --filter '{
       { "field": "priority", "operator": "gte", "value": 3 },
       { "field": "reviewed", "operator": "eq", "value": true }
     ] },
+    { "field": "topics", "operator": "prefix", "value": "sql", "caseInsensitive": true },
     { "operator": "not", "operand": { "field": "audience", "operator": "eq", "value": "internal" } }
   ]
 }'
@@ -968,13 +969,18 @@ qmd query "dependency injection" --filter '{
 | Negation | `{ "operator": "not", "operand": {…} }` |
 | Comparison | `{ "field", "operator": "eq" \| "ne" \| "gt" \| "gte" \| "lt" \| "lte", "value" }` |
 | Membership | `{ "field", "operator": "in" \| "nin" \| "all", "value": […] }` |
+| Text | `{ "field", "operator": "contains" \| "prefix" \| "suffix", "value": "…" }` |
+| Type | `{ "field", "operator": "type", "value": "string" \| "number" \| "boolean" }` |
 | Presence | `{ "field", "operator": "exists", "value": true \| false }` |
+
+Any condition whose value is a string or an array of strings may add `"caseInsensitive": true`.
 
 Semantics:
 
-- Matching is typed and exact — no string/number/boolean coercion, and a type mismatch never matches (including `ne` and `nin`).
+- Matching is typed and exact — no string/number/boolean coercion, and a type mismatch never matches (including `ne` and `nin`). Text operators match string values only. `type` matches the stored type of a key's values, which is how a filter reaches one side of a key whose documents disagree on type.
 - Array-valued metadata is a set: a condition matches when any element satisfies it, `all` requires every filter value to be present.
 - Missing keys do not match `ne`/`nin`; combine with `{ "operator": "exists", "value": false }` in an `or` group to include them.
+- Matching is case-sensitive unless a condition sets `caseInsensitive`, which folds ASCII letters on both sides. Non-ASCII letters compare exactly.
 - Multiple conditions require an explicit `and` group — there is no implicit AND, and no `$`-prefixed shorthand.
 
 Guarantees and limits:

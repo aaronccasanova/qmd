@@ -81,6 +81,9 @@ import {
   type MetadataFilterGroup,
   type MetadataFilterNegation,
   type MetadataCondition,
+  type MetadataPredicate,
+  type MetadataPredicateGroup,
+  type MetadataPredicateNegation,
 } from "./metadata-filter.js";
 import {
   setConfigSource,
@@ -133,6 +136,9 @@ export type {
   MetadataFilterGroup,
   MetadataFilterNegation,
   MetadataCondition,
+  MetadataPredicate,
+  MetadataPredicateGroup,
+  MetadataPredicateNegation,
 };
 export { parseMetadataFilter, MetadataFilterError };
 

@@ -349,8 +349,10 @@ Intent-aware lex (C++ performance, not sports):
           "Metadata filter (recursive JSON AST). Every returned result satisfies it. " +
           "Nodes are operator-discriminated: logical groups {operator:'and'|'or', operands:[...]}, " +
           "negation {operator:'not', operand:{...}}, and conditions {field, operator, value} with " +
-          "operators eq/ne/gt/gte/lt/lte (comparison), in/nin/all (membership), exists (presence). " +
+          "operators eq/ne/gt/gte/lt/lte (comparison), in/nin/all (membership), contains/prefix/suffix (text), " +
+          "type (value is 'string'|'number'|'boolean'), exists (presence). " +
           "Values are typed exactly (no coercion); missing keys do not match ne/nin. " +
+          "Conditions with a string value may add caseInsensitive:true (ASCII folding). " +
           "Example: {\"operator\":\"and\",\"operands\":[{\"field\":\"topics\",\"operator\":\"all\",\"value\":[\"typescript\"]}," +
           "{\"field\":\"status\",\"operator\":\"ne\",\"value\":\"draft\"}]}"
         ),
