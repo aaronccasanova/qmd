@@ -7,7 +7,11 @@
  *
  *   { "operator": "and", "operands": [ ... ] }
  *   { "operator": "not", "operand": { ... } }
- *   { "key": "status", "operator": "eq", "value": "published" }
+ *   { "field": "status", "operator": "eq", "value": "published" }
+ *
+ * A condition is a predicate over one field of the record under evaluation:
+ * `field` names it, `operator` says how to compare, `value` is the operand.
+ * For a document, the fields are its metadata keys.
  *
  * Compilation emits correlated EXISTS/NOT EXISTS subqueries over
  * `document_metadata_values` with every user value bound as a parameter —
@@ -37,10 +41,10 @@ export interface MetadataFilterNegation {
 }
 
 export type MetadataCondition =
-  | { key: string; operator: "eq" | "ne"; value: MetadataScalar }
-  | { key: string; operator: "gt" | "gte" | "lt" | "lte"; value: string | number }
-  | { key: string; operator: "in" | "nin" | "all"; value: MetadataScalarArray }
-  | { key: string; operator: "exists"; value: boolean };
+  | { field: string; operator: "eq" | "ne"; value: MetadataScalar }
+  | { field: string; operator: "gt" | "gte" | "lt" | "lte"; value: string | number }
+  | { field: string; operator: "in" | "nin" | "all"; value: MetadataScalarArray }
+  | { field: string; operator: "exists"; value: boolean };
 
 export interface CompiledMetadataFilter {
   sql: string;
@@ -175,14 +179,14 @@ function parseFilterNegation(
 }
 
 function parseFilterCondition(node: Record<string, unknown>, operator: string, path: string): MetadataCondition {
-  rejectUnknownProperties(node, ["key", "operator", "value"], path);
+  rejectUnknownProperties(node, ["field", "operator", "value"], path);
 
-  const key = node["key"];
-  if (typeof key !== "string" || key.length === 0) {
-    throw new MetadataFilterError(path, `'${operator}' requires a non-empty string 'key'`);
+  const field = node["field"];
+  if (typeof field !== "string" || field.length === 0) {
+    throw new MetadataFilterError(path, `'${operator}' requires a non-empty string 'field'`);
   }
-  if (Buffer.byteLength(key, "utf-8") > METADATA_FILTER_LIMITS.maxKeyBytes) {
-    throw new MetadataFilterError(path, `'key' exceeds ${METADATA_FILTER_LIMITS.maxKeyBytes} bytes`);
+  if (Buffer.byteLength(field, "utf-8") > METADATA_FILTER_LIMITS.maxKeyBytes) {
+    throw new MetadataFilterError(path, `'field' exceeds ${METADATA_FILTER_LIMITS.maxKeyBytes} bytes`);
   }
 
   if (!("value" in node)) {
@@ -194,12 +198,12 @@ function parseFilterCondition(node: Record<string, unknown>, operator: string, p
     if (typeof value !== "boolean") {
       throw new MetadataFilterError(`${path}.value`, "'exists' requires a boolean value");
     }
-    return { key, operator, value };
+    return { field, operator, value };
   }
 
   if (MEMBERSHIP_OPERATORS.has(operator)) {
     return {
-      key,
+      field,
       operator: operator as "in" | "nin" | "all",
       value: parseMembershipValues(value, operator, path),
     };
@@ -210,7 +214,7 @@ function parseFilterCondition(node: Record<string, unknown>, operator: string, p
   if (ORDERED_OPERATORS.has(operator) && typeof scalar === "boolean") {
     throw new MetadataFilterError(`${path}.value`, `'${operator}' requires a string or number value`);
   }
-  return { key, operator, value: scalar } as MetadataCondition;
+  return { field, operator, value: scalar } as MetadataCondition;
 }
 
 function parseMembershipValues(value: unknown, operator: string, path: string): MetadataScalarArray {
@@ -293,7 +297,7 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
       return `NOT ${compileFilterNode(filter.operand, alias, params)}`;
 
     case "exists":
-      params.push(filter.key);
+      params.push(filter.field);
       return filter.value
         ? buildValueExistsSql(alias, "mv.key = ?")
         : `NOT ${buildValueExistsSql(alias, "mv.key = ?")}`;
@@ -304,7 +308,7 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
     case "lt":
     case "lte": {
       const sqlOperator = { eq: "=", gt: ">", gte: ">=", lt: "<", lte: "<=" }[filter.operator];
-      params.push(filter.key, bindScalar(filter.value));
+      params.push(filter.field, bindScalar(filter.value));
       return buildValueExistsSql(
         alias,
         `mv.key = ? AND mv.value_type = '${valueTypeOf(filter.value)}' AND mv.${valueColumnOf(filter.value)} ${sqlOperator} ?`,
@@ -315,9 +319,9 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
       // Key must have at least one same-type value, and no same-type value
       // may equal the operand. Missing keys and type mismatches do not match.
       const valueType = valueTypeOf(filter.value);
-      params.push(filter.key);
+      params.push(filter.field);
       const presentSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}'`);
-      params.push(filter.key, bindScalar(filter.value));
+      params.push(filter.field, bindScalar(filter.value));
       const equalSql = buildValueExistsSql(
         alias,
         `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${valueColumnOf(filter.value)} = ?`,
@@ -332,13 +336,13 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
       const placeholders = filter.value.map(() => "?").join(", ");
 
       if (filter.operator === "in") {
-        params.push(filter.key, ...filter.value.map(bindScalar));
+        params.push(filter.field, ...filter.value.map(bindScalar));
         return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} IN (${placeholders})`);
       }
 
-      params.push(filter.key);
+      params.push(filter.field);
       const presentSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}'`);
-      params.push(filter.key, ...filter.value.map(bindScalar));
+      params.push(filter.field, ...filter.value.map(bindScalar));
       const memberSql = buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} IN (${placeholders})`);
       return `(${presentSql} AND NOT ${memberSql})`;
     }
@@ -347,7 +351,7 @@ function compileFilterNode(filter: MetadataFilter, alias: string, params: (strin
       const valueType = valueTypeOf(filter.value[0]!);
       const column = valueColumnOf(filter.value[0]!);
       const memberSqls = filter.value.map(element => {
-        params.push(filter.key, bindScalar(element));
+        params.push(filter.field, bindScalar(element));
         return buildValueExistsSql(alias, `mv.key = ? AND mv.value_type = '${valueType}' AND mv.${column} = ?`);
       });
       return `(${memberSqls.join(" AND ")})`;

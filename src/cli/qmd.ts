@@ -2832,7 +2832,7 @@ function parseCliMetadataFilter(rawFilter: unknown): MetadataFilter | undefined 
     filterJson = JSON.parse(String(rawFilter));
   } catch (err) {
     console.error(`Invalid --filter JSON: ${err instanceof Error ? err.message : String(err)}`);
-    console.error(`Example: --filter '{"key":"status","operator":"eq","value":"published"}'`);
+    console.error(`Example: --filter '{"field":"status","operator":"eq","value":"published"}'`);
     process.exit(1);
   }
 
@@ -3730,7 +3730,7 @@ function showHelp(): void {
   console.log("  --format <kind>            - Output format: cli (default) | json | csv | md | xml | files");
   console.log("  -c, --collection <name>    - Filter by one or more collections");
   console.log("  --filter <json>            - Metadata filter (recursive JSON AST; search/vsearch/query)");
-  console.log("                                e.g. '{\"key\":\"status\",\"operator\":\"eq\",\"value\":\"published\"}'");
+  console.log("                                e.g. '{\"field\":\"status\",\"operator\":\"eq\",\"value\":\"published\"}'");
   console.log("");
   console.log("Embed/query options:");
   console.log("  --chunk-strategy <auto|regex> - Chunking mode (default: regex; auto uses AST for code files)");

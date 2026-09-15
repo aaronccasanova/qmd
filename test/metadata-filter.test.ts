@@ -23,16 +23,16 @@ import { METADATA_EXTRACTION_VERSION, type DocumentMetadata } from "../src/metad
 describe("parseMetadataFilter", () => {
   test("accepts every condition operator shape", () => {
     const conditions: unknown[] = [
-      { key: "status", operator: "eq", value: "published" },
-      { key: "status", operator: "ne", value: "draft" },
-      { key: "priority", operator: "gt", value: 3 },
-      { key: "priority", operator: "gte", value: 3 },
-      { key: "priority", operator: "lt", value: 10 },
-      { key: "name", operator: "lte", value: "m" },
-      { key: "topics", operator: "in", value: ["a", "b"] },
-      { key: "topics", operator: "nin", value: [1, 2] },
-      { key: "flags", operator: "all", value: [true, false] },
-      { key: "status", operator: "exists", value: false },
+      { field: "status", operator: "eq", value: "published" },
+      { field: "status", operator: "ne", value: "draft" },
+      { field: "priority", operator: "gt", value: 3 },
+      { field: "priority", operator: "gte", value: 3 },
+      { field: "priority", operator: "lt", value: 10 },
+      { field: "name", operator: "lte", value: "m" },
+      { field: "topics", operator: "in", value: ["a", "b"] },
+      { field: "topics", operator: "nin", value: [1, 2] },
+      { field: "flags", operator: "all", value: [true, false] },
+      { field: "status", operator: "exists", value: false },
     ];
     for (const condition of conditions) {
       expect(parseMetadataFilter(condition)).toEqual(condition);
@@ -43,12 +43,12 @@ describe("parseMetadataFilter", () => {
     const filter = {
       operator: "and",
       operands: [
-        { key: "topics", operator: "all", value: ["typescript", "programming"] },
+        { field: "topics", operator: "all", value: ["typescript", "programming"] },
         {
           operator: "or",
           operands: [
-            { key: "status", operator: "eq", value: "published" },
-            { operator: "not", operand: { key: "audience", operator: "eq", value: "internal" } },
+            { field: "status", operator: "eq", value: "published" },
+            { operator: "not", operand: { field: "audience", operator: "eq", value: "internal" } },
           ],
         },
       ],
@@ -57,31 +57,32 @@ describe("parseMetadataFilter", () => {
   });
 
   test("canonicalizes membership arrays by de-duplicating", () => {
-    const parsed = parseMetadataFilter({ key: "topics", operator: "in", value: ["a", "b", "a"] });
-    expect(parsed).toEqual({ key: "topics", operator: "in", value: ["a", "b"] });
+    const parsed = parseMetadataFilter({ field: "topics", operator: "in", value: ["a", "b", "a"] });
+    expect(parsed).toEqual({ field: "topics", operator: "in", value: ["a", "b"] });
   });
 
   test("rejects invalid node shapes with the failing JSON path", () => {
     const cases: [unknown, RegExp][] = [
       ["not-an-object", /at \$:.*must be an object/],
-      [{ key: "a", value: 1 }, /at \$:.*missing 'operator'/],
-      [{ operator: "equal", key: "a", value: 1 }, /unknown operator 'equal'/],
+      [{ field: "a", value: 1 }, /at \$:.*missing 'operator'/],
+      [{ operator: "equal", field: "a", value: 1 }, /unknown operator 'equal'/],
       [{ operator: "and", operands: [] }, /non-empty 'operands'/],
       [{ operator: "and", operands: "nope" }, /'operands' array/],
-      [{ operator: "not", operands: [{ key: "a", operator: "eq", value: 1 }] }, /unknown property 'operands'/],
+      [{ operator: "not", operands: [{ field: "a", operator: "eq", value: 1 }] }, /unknown property 'operands'/],
       [{ operator: "not" }, /exactly one 'operand'/],
       [{ operator: "and", operands: [{ operator: "eq" }] }, /at \$\.operands\[0\]/],
-      [{ operator: "eq", value: 1 }, /non-empty string 'key'/],
-      [{ operator: "eq", key: "a" }, /requires a 'value'/],
-      [{ operator: "eq", key: "a", value: 1, extra: true }, /unknown property 'extra'/],
-      [{ operator: "and", operands: [{ key: "a", operator: "eq", value: 1 }], key: "a" }, /unknown property 'key'/],
-      [{ operator: "gt", key: "a", value: true }, /string or number value/],
-      [{ operator: "eq", key: "a", value: NaN }, /finite/],
-      [{ operator: "eq", key: "a", value: { nested: 1 } }, /string, number, or boolean/],
-      [{ operator: "in", key: "a", value: "x" }, /array value/],
-      [{ operator: "in", key: "a", value: [] }, /non-empty array/],
-      [{ operator: "in", key: "a", value: [1, "two"] }, /homogeneous array/],
-      [{ operator: "exists", key: "a", value: "yes" }, /boolean value/],
+      [{ operator: "eq", value: 1 }, /non-empty string 'field'/],
+      [{ operator: "eq", field: "a" }, /requires a 'value'/],
+      [{ operator: "eq", field: "a", value: 1, extra: true }, /unknown property 'extra'/],
+      [{ operator: "and", operands: [{ field: "a", operator: "eq", value: 1 }], field: "a" }, /unknown property 'field'/],
+      [{ operator: "eq", key: "a", value: 1 }, /unknown property 'key'/],
+      [{ operator: "gt", field: "a", value: true }, /string or number value/],
+      [{ operator: "eq", field: "a", value: NaN }, /finite/],
+      [{ operator: "eq", field: "a", value: { nested: 1 } }, /string, number, or boolean/],
+      [{ operator: "in", field: "a", value: "x" }, /array value/],
+      [{ operator: "in", field: "a", value: [] }, /non-empty array/],
+      [{ operator: "in", field: "a", value: [1, "two"] }, /homogeneous array/],
+      [{ operator: "exists", field: "a", value: "yes" }, /boolean value/],
     ];
 
     for (const [input, expected] of cases) {
@@ -91,13 +92,13 @@ describe("parseMetadataFilter", () => {
   });
 
   test("rejects excessive depth, node count, and operand count", () => {
-    let deepFilter: unknown = { key: "a", operator: "eq", value: 1 };
+    let deepFilter: unknown = { field: "a", operator: "eq", value: 1 };
     for (let i = 0; i <= METADATA_FILTER_LIMITS.maxDepth; i++) {
       deepFilter = { operator: "not", operand: deepFilter };
     }
     expect(() => parseMetadataFilter(deepFilter)).toThrow(/nesting depth/);
 
-    const condition = { key: "a", operator: "eq", value: 1 };
+    const condition = { field: "a", operator: "eq", value: 1 };
     const wideGroup = {
       operator: "or",
       operands: Array.from({ length: METADATA_FILTER_LIMITS.maxGroupOperands + 1 }, () => condition),
@@ -114,7 +115,7 @@ describe("parseMetadataFilter", () => {
     expect(() => parseMetadataFilter(manyNodes)).toThrow(/nodes/);
 
     const manyValues = {
-      key: "a",
+      field: "a",
       operator: "in",
       value: Array.from({ length: METADATA_FILTER_LIMITS.maxMembershipValues + 1 }, (_, i) => i),
     };
@@ -170,10 +171,10 @@ describe("compileMetadataFilter semantics", () => {
     insertDoc("num.md", { status: 1 });
     insertDoc("bool.md", { status: true });
 
-    expect(matchPaths({ key: "status", operator: "eq", value: "published" })).toEqual(["str.md"]);
-    expect(matchPaths({ key: "status", operator: "eq", value: 1 })).toEqual(["num.md"]);
-    expect(matchPaths({ key: "status", operator: "eq", value: true })).toEqual(["bool.md"]);
-    expect(matchPaths({ key: "status", operator: "eq", value: "1" })).toEqual([]);
+    expect(matchPaths({ field: "status", operator: "eq", value: "published" })).toEqual(["str.md"]);
+    expect(matchPaths({ field: "status", operator: "eq", value: 1 })).toEqual(["num.md"]);
+    expect(matchPaths({ field: "status", operator: "eq", value: true })).toEqual(["bool.md"]);
+    expect(matchPaths({ field: "status", operator: "eq", value: "1" })).toEqual([]);
   });
 
   test("ne requires key presence and matching type", () => {
@@ -182,7 +183,7 @@ describe("compileMetadataFilter semantics", () => {
     insertDoc("missing.md", { other: "x" });
     insertDoc("typed.md", { status: 1 });
 
-    expect(matchPaths({ key: "status", operator: "ne", value: "draft" })).toEqual(["published.md"]);
+    expect(matchPaths({ field: "status", operator: "ne", value: "draft" })).toEqual(["published.md"]);
   });
 
   test("ordered comparisons match numbers and binary-ordered strings", () => {
@@ -192,11 +193,11 @@ describe("compileMetadataFilter semantics", () => {
     insertDoc("alpha.md", { name: "alpha" });
     insertDoc("zulu.md", { name: "zulu" });
 
-    expect(matchPaths({ key: "priority", operator: "gte", value: 3 })).toEqual(["high.md", "mid.md"]);
-    expect(matchPaths({ key: "priority", operator: "lt", value: 3 })).toEqual(["low.md"]);
-    expect(matchPaths({ key: "name", operator: "gt", value: "alpha" })).toEqual(["zulu.md"]);
+    expect(matchPaths({ field: "priority", operator: "gte", value: 3 })).toEqual(["high.md", "mid.md"]);
+    expect(matchPaths({ field: "priority", operator: "lt", value: 3 })).toEqual(["low.md"]);
+    expect(matchPaths({ field: "name", operator: "gt", value: "alpha" })).toEqual(["zulu.md"]);
     // Type mismatch: no string 'priority' values exist.
-    expect(matchPaths({ key: "priority", operator: "gte", value: "3" })).toEqual([]);
+    expect(matchPaths({ field: "priority", operator: "gte", value: "3" })).toEqual([]);
   });
 
   test("in, nin, and all evaluate membership over value sets", () => {
@@ -204,18 +205,18 @@ describe("compileMetadataFilter semantics", () => {
     insertDoc("go.md", { topics: ["go"] });
     insertDoc("none.md", { other: "x" });
 
-    expect(matchPaths({ key: "topics", operator: "in", value: ["typescript", "rust"] })).toEqual(["ts.md"]);
-    expect(matchPaths({ key: "topics", operator: "nin", value: ["typescript", "rust"] })).toEqual(["go.md"]);
-    expect(matchPaths({ key: "topics", operator: "all", value: ["typescript", "programming"] })).toEqual(["ts.md"]);
-    expect(matchPaths({ key: "topics", operator: "all", value: ["typescript", "rust"] })).toEqual([]);
+    expect(matchPaths({ field: "topics", operator: "in", value: ["typescript", "rust"] })).toEqual(["ts.md"]);
+    expect(matchPaths({ field: "topics", operator: "nin", value: ["typescript", "rust"] })).toEqual(["go.md"]);
+    expect(matchPaths({ field: "topics", operator: "all", value: ["typescript", "programming"] })).toEqual(["ts.md"]);
+    expect(matchPaths({ field: "topics", operator: "all", value: ["typescript", "rust"] })).toEqual([]);
   });
 
   test("exists matches presence and absence", () => {
     insertDoc("has.md", { status: "ok" });
     insertDoc("hasnt.md", { other: "x" });
 
-    expect(matchPaths({ key: "status", operator: "exists", value: true })).toEqual(["has.md"]);
-    expect(matchPaths({ key: "status", operator: "exists", value: false })).toEqual(["hasnt.md"]);
+    expect(matchPaths({ field: "status", operator: "exists", value: true })).toEqual(["has.md"]);
+    expect(matchPaths({ field: "status", operator: "exists", value: false })).toEqual(["hasnt.md"]);
   });
 
   test("and, or, and not compose recursively", () => {
@@ -226,22 +227,22 @@ describe("compileMetadataFilter semantics", () => {
     expect(matchPaths({
       operator: "and",
       operands: [
-        { key: "status", operator: "eq", value: "published" },
-        { key: "priority", operator: "gte", value: 3 },
+        { field: "status", operator: "eq", value: "published" },
+        { field: "priority", operator: "gte", value: 3 },
       ],
     })).toEqual(["a.md"]);
 
     expect(matchPaths({
       operator: "or",
       operands: [
-        { key: "priority", operator: "gte", value: 9 },
-        { key: "priority", operator: "lte", value: 1 },
+        { field: "priority", operator: "gte", value: 9 },
+        { field: "priority", operator: "lte", value: 1 },
       ],
     })).toEqual(["b.md", "c.md"]);
 
     expect(matchPaths({
       operator: "not",
-      operand: { key: "status", operator: "eq", value: "draft" },
+      operand: { field: "status", operator: "eq", value: "draft" },
     })).toEqual(["a.md", "b.md"]);
   });
 
@@ -252,8 +253,8 @@ describe("compileMetadataFilter semantics", () => {
     const rangeFilter: MetadataFilter = {
       operator: "and",
       operands: [
-        { key: "priority", operator: "gte", value: 3 },
-        { key: "priority", operator: "lt", value: 10 },
+        { field: "priority", operator: "gte", value: 3 },
+        { field: "priority", operator: "lt", value: 10 },
       ],
     };
     // Document-level semantics: [1, 20] satisfies both conditions via
@@ -265,15 +266,15 @@ describe("compileMetadataFilter semantics", () => {
     insertDoc("flagged.md", { reviewed: true });
     insertDoc("unflagged.md", { reviewed: false });
 
-    expect(matchPaths({ key: "reviewed", operator: "in", value: [true] })).toEqual(["flagged.md"]);
-    expect(matchPaths({ key: "reviewed", operator: "nin", value: [true] })).toEqual(["unflagged.md"]);
+    expect(matchPaths({ field: "reviewed", operator: "in", value: [true] })).toEqual(["flagged.md"]);
+    expect(matchPaths({ field: "reviewed", operator: "nin", value: [true] })).toEqual(["unflagged.md"]);
   });
 
   test("SQL injection payloads in keys and values stay data", () => {
     insertDoc("safe.md", { "key'; DROP TABLE documents; --": "v'; DROP TABLE documents; --" });
 
     expect(matchPaths({
-      key: "key'; DROP TABLE documents; --",
+      field: "key'; DROP TABLE documents; --",
       operator: "eq",
       value: "v'; DROP TABLE documents; --",
     })).toEqual(["safe.md"]);
@@ -286,8 +287,8 @@ describe("compileMetadataFilter semantics", () => {
     const filter = parseMetadataFilter({
       operator: "and",
       operands: [
-        { key: "key'; --", operator: "eq", value: "value'; --" },
-        { key: "topics", operator: "in", value: ["a'; --"] },
+        { field: "key'; --", operator: "eq", value: "value'; --" },
+        { field: "topics", operator: "in", value: ["a'; --"] },
       ],
     });
     const compiled = compileMetadataFilter(filter, "d");

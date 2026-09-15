@@ -68,7 +68,7 @@ describe("SDK metadata filter", () => {
     expect(unfiltered.length).toBe(2);
 
     const filtered = await store.searchLex("sdk keyword", {
-      filter: { key: "status", operator: "eq", value: "published" },
+      filter: { field: "status", operator: "eq", value: "published" },
     });
     expect(filtered.map(r => r.displayPath)).toEqual(["docs/published.md"]);
     expect(filtered[0]!.metadata).toEqual({ status: "published", topics: ["typescript"] });
@@ -77,7 +77,7 @@ describe("SDK metadata filter", () => {
   test("search with pre-expanded queries applies the filter", async () => {
     const results = await store.search({
       queries: [{ type: "lex", query: "sdk keyword" }],
-      filter: { key: "status", operator: "ne", value: "draft" },
+      filter: { field: "status", operator: "ne", value: "draft" },
       rerank: false,
     });
     expect(results.map(r => r.displayPath)).toEqual(["docs/published.md"]);
@@ -190,7 +190,7 @@ describe("MCP and HTTP metadata filter", () => {
   test("POST /query applies the filter and includes metadata", async () => {
     const { status, json } = await postJson("/query", {
       searches: [{ type: "lex", query: "http keyword" }],
-      filter: { key: "status", operator: "eq", value: "published" },
+      filter: { field: "status", operator: "eq", value: "published" },
       rerank: false,
     });
     expect(status).toBe(200);
@@ -202,7 +202,7 @@ describe("MCP and HTTP metadata filter", () => {
   test("POST /search alias accepts the same filter", async () => {
     const { status, json } = await postJson("/search", {
       searches: [{ type: "lex", query: "http keyword" }],
-      filter: { key: "status", operator: "eq", value: "draft" },
+      filter: { field: "status", operator: "eq", value: "draft" },
       rerank: false,
     });
     expect(status).toBe(200);
@@ -220,7 +220,7 @@ describe("MCP and HTTP metadata filter", () => {
 
     const invalidAst = await postJson("/query", {
       searches: [{ type: "lex", query: "http keyword" }],
-      filter: { key: "status", operator: "equal", value: "published" },
+      filter: { field: "status", operator: "equal", value: "published" },
     });
     expect(invalidAst.status).toBe(400);
     expect(invalidAst.json.error).toMatch(/unknown operator 'equal'/);
@@ -232,8 +232,8 @@ describe("MCP and HTTP metadata filter", () => {
       filter: {
         operator: "and",
         operands: [
-          { key: "status", operator: "eq", value: "published" },
-          { operator: "not", operand: { key: "status", operator: "eq", value: "draft" } },
+          { field: "status", operator: "eq", value: "published" },
+          { operator: "not", operand: { field: "status", operator: "eq", value: "draft" } },
         ],
       },
       rerank: false,

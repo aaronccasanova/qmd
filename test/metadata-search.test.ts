@@ -71,7 +71,7 @@ describe("searchFTS with metadata filter", () => {
     expect(unfiltered.length).toBe(3);
 
     const filtered = searchFTS(store.db, "authentication", 10, undefined, {
-      key: "status", operator: "eq", value: "published",
+      field: "status", operator: "eq", value: "published",
     });
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/published.md"]);
     expect(filtered[0]!.metadata).toEqual({ status: "published" });
@@ -95,7 +95,7 @@ describe("searchFTS with metadata filter", () => {
 
     // An unprocessed document must not satisfy `exists: false`.
     const filtered = searchFTS(store.db, "common", 10, undefined, {
-      key: "status", operator: "exists", value: false,
+      field: "status", operator: "exists", value: false,
     });
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/extracted.md"]);
 
@@ -110,7 +110,7 @@ describe("searchFTS with metadata filter", () => {
     await insertDoc("other", "d.md", "# D\n\nshared topic", { status: "published" });
 
     const filtered = searchFTS(store.db, "shared", 10, ["notes", "docs"], {
-      key: "status", operator: "eq", value: "published",
+      field: "status", operator: "eq", value: "published",
     });
     expect(filtered.map(r => r.displayPath).sort()).toEqual(["docs/b.md", "notes/a.md"]);
   });
@@ -129,12 +129,12 @@ describe("searchFTS with metadata filter", () => {
     const filter: MetadataFilter = {
       operator: "and",
       operands: [
-        { key: "topics", operator: "all", value: ["typescript", "programming"] },
+        { field: "topics", operator: "all", value: ["typescript", "programming"] },
         {
           operator: "or",
           operands: [
-            { key: "status", operator: "eq", value: "published" },
-            { key: "priority", operator: "gte", value: 3 },
+            { field: "status", operator: "eq", value: "published" },
+            { field: "priority", operator: "gte", value: 3 },
           ],
         },
       ],
@@ -151,7 +151,7 @@ describe("searchFTS with metadata filter", () => {
     }
 
     const filtered = searchFTS(store.db, "repeated keyword", 5, undefined, {
-      key: "status", operator: "eq", value: "published",
+      field: "status", operator: "eq", value: "published",
     });
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/doc-0.md"]);
   });
@@ -182,7 +182,7 @@ describe("searchVec with metadata filter", () => {
 
     const filtered = await searchVec(
       store.db, "q", model, 10, undefined, undefined, queryEmbedding, undefined,
-      { key: "status", operator: "eq", value: "published" },
+      { field: "status", operator: "eq", value: "published" },
     );
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/far-published.md"]);
     expect(filtered[0]!.metadata).toEqual({ status: "published" });
@@ -194,7 +194,7 @@ describe("searchVec with metadata filter", () => {
 
     const filtered = await searchVec(
       store.db, "q", model, 10, undefined, undefined, queryEmbedding, undefined,
-      { key: "status", operator: "eq", value: "published" },
+      { field: "status", operator: "eq", value: "published" },
     );
     expect(filtered).toEqual([]);
   });
@@ -218,7 +218,7 @@ describe("searchVec with metadata filter", () => {
 
     const filtered = await searchVec(
       store.db, "q", model, 10, undefined, undefined, queryEmbedding, undefined,
-      { key: "status", operator: "eq", value: "published" },
+      { field: "status", operator: "eq", value: "published" },
     );
     expect(filtered.map(r => r.displayPath)).toEqual(["notes/published-copy.md"]);
   });
@@ -230,7 +230,7 @@ describe("searchVec with metadata filter", () => {
 
     const filtered = await searchVec(
       store.db, "q", model, 10, "docs", undefined, queryEmbedding, undefined,
-      { key: "status", operator: "eq", value: "published" },
+      { field: "status", operator: "eq", value: "published" },
     );
     expect(filtered.map(r => r.displayPath)).toEqual(["docs/b.md"]);
   });
@@ -248,7 +248,7 @@ describe("structuredSearch with metadata filter", () => {
     syncDocumentMetadata(store.db, draftId, draftBody, "draft.md");
 
     const results = await structuredSearch(store, [{ type: "lex", query: "structured keyword" }], {
-      filter: { key: "status", operator: "eq", value: "published" },
+      filter: { field: "status", operator: "eq", value: "published" },
       skipRerank: true,
     });
 

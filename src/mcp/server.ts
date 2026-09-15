@@ -348,11 +348,11 @@ Intent-aware lex (C++ performance, not sports):
         filter: z.record(z.string(), z.unknown()).optional().describe(
           "Metadata filter (recursive JSON AST). Every returned result satisfies it. " +
           "Nodes are operator-discriminated: logical groups {operator:'and'|'or', operands:[...]}, " +
-          "negation {operator:'not', operand:{...}}, and conditions {key, operator, value} with " +
+          "negation {operator:'not', operand:{...}}, and conditions {field, operator, value} with " +
           "operators eq/ne/gt/gte/lt/lte (comparison), in/nin/all (membership), exists (presence). " +
           "Values are typed exactly (no coercion); missing keys do not match ne/nin. " +
-          "Example: {\"operator\":\"and\",\"operands\":[{\"key\":\"topics\",\"operator\":\"all\",\"value\":[\"typescript\"]}," +
-          "{\"key\":\"status\",\"operator\":\"ne\",\"value\":\"draft\"}]}"
+          "Example: {\"operator\":\"and\",\"operands\":[{\"field\":\"topics\",\"operator\":\"all\",\"value\":[\"typescript\"]}," +
+          "{\"field\":\"status\",\"operator\":\"ne\",\"value\":\"draft\"}]}"
         ),
         intent: z.string().optional().describe(
           "Background context to disambiguate the query. Example: query='performance', intent='web page load times and Core Web Vitals'. Does not search on its own."

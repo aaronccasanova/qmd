@@ -93,7 +93,7 @@ describe("qmd search --filter", () => {
     const { stdout, exitCode } = await runQmd([
       "search", "cli filter keyword",
       "--format", "json",
-      "--filter", '{"key":"status","operator":"eq","value":"published"}',
+      "--filter", '{"field":"status","operator":"eq","value":"published"}',
     ]);
     expect(exitCode).toBe(0);
 
@@ -107,8 +107,8 @@ describe("qmd search --filter", () => {
     const filter = JSON.stringify({
       operator: "and",
       operands: [
-        { key: "topics", operator: "all", value: ["typescript", "programming"] },
-        { operator: "not", operand: { key: "status", operator: "eq", value: "draft" } },
+        { field: "topics", operator: "all", value: ["typescript", "programming"] },
+        { operator: "not", operand: { field: "status", operator: "eq", value: "draft" } },
       ],
     });
     const { stdout, exitCode } = await runQmd([
@@ -122,7 +122,7 @@ describe("qmd search --filter", () => {
     const { stdout, exitCode } = await runQmd([
       "search", "cli filter keyword",
       "--format", "json",
-      "--filter", '{"key":"status","operator":"eq","value":"missing"}',
+      "--filter", '{"field":"status","operator":"eq","value":"missing"}',
     ]);
     expect(exitCode).toBe(0);
     expect(JSON.parse(stdout)).toEqual([]);
@@ -152,7 +152,7 @@ describe("qmd search --filter", () => {
 
   test("rejects valid JSON with an invalid filter AST", async () => {
     const { stderr, exitCode } = await runQmd([
-      "search", "cli filter keyword", "--filter", '{"key":"status","operator":"equal","value":"x"}',
+      "search", "cli filter keyword", "--filter", '{"field":"status","operator":"equal","value":"x"}',
     ]);
     expect(exitCode).toBe(1);
     expect(stderr).toMatch(/Invalid metadata filter at \$/);

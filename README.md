@@ -302,8 +302,8 @@ const published = await store.search({
   filter: {
     operator: "and",
     operands: [
-      { key: "topics", operator: "all", value: ["typescript"] },
-      { key: "status", operator: "ne", value: "draft" },
+      { field: "topics", operator: "all", value: ["typescript"] },
+      { field: "status", operator: "ne", value: "draft" },
     ],
   },
 })
@@ -940,24 +940,24 @@ qmd:
 
 Supported values are strings, numbers, booleans, and flat homogeneous arrays of one of those. Nested objects, nulls, empty arrays, and mixed-type arrays are rejected (the document still indexes; it is excluded from filtered search until corrected). Metadata keys are user-defined data — `tags`, `topics`, and `labels` are all ordinary keys with no special semantics.
 
-Every search surface (CLI, SDK, MCP, HTTP) accepts the same recursive filter, a JSON AST discriminated by `operator`:
+Every search surface (CLI, SDK, MCP, HTTP) accepts the same recursive filter, a JSON AST discriminated by `operator`. A condition is a predicate over one field of the document's metadata: `field` names the metadata key, `operator` says how to compare, and `value` is what to compare against:
 
 ```sh
 # One condition
 qmd search "authentication" \
-  --filter '{"key":"status","operator":"eq","value":"published"}'
+  --filter '{"field":"status","operator":"eq","value":"published"}'
 
 # Composed conditions — works with search, vsearch, and query
 qmd query "dependency injection" --filter '{
   "operator": "and",
   "operands": [
-    { "key": "topics", "operator": "all", "value": ["typescript", "programming"] },
-    { "key": "status", "operator": "nin", "value": ["draft", "archived"] },
+    { "field": "topics", "operator": "all", "value": ["typescript", "programming"] },
+    { "field": "status", "operator": "nin", "value": ["draft", "archived"] },
     { "operator": "or", "operands": [
-      { "key": "priority", "operator": "gte", "value": 3 },
-      { "key": "reviewed", "operator": "eq", "value": true }
+      { "field": "priority", "operator": "gte", "value": 3 },
+      { "field": "reviewed", "operator": "eq", "value": true }
     ] },
-    { "operator": "not", "operand": { "key": "audience", "operator": "eq", "value": "internal" } }
+    { "operator": "not", "operand": { "field": "audience", "operator": "eq", "value": "internal" } }
   ]
 }'
 ```
@@ -966,9 +966,9 @@ qmd query "dependency injection" --filter '{
 |------|-------|
 | Logical group | `{ "operator": "and" \| "or", "operands": […] }` |
 | Negation | `{ "operator": "not", "operand": {…} }` |
-| Comparison | `{ "key", "operator": "eq" \| "ne" \| "gt" \| "gte" \| "lt" \| "lte", "value" }` |
-| Membership | `{ "key", "operator": "in" \| "nin" \| "all", "value": […] }` |
-| Presence | `{ "key", "operator": "exists", "value": true \| false }` |
+| Comparison | `{ "field", "operator": "eq" \| "ne" \| "gt" \| "gte" \| "lt" \| "lte", "value" }` |
+| Membership | `{ "field", "operator": "in" \| "nin" \| "all", "value": […] }` |
+| Presence | `{ "field", "operator": "exists", "value": true \| false }` |
 
 Semantics:
 
