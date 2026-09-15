@@ -89,12 +89,15 @@ import {
 import {
   syncDocumentMetadata,
   countDocumentsPendingMetadata,
+  countDocumentsWithMetadata,
+  countMetadataKeys,
   listMetadata,
+  listMetadataKeys,
   MetadataBindingBudgetError,
   type ListMetadataOptions,
   type ListMetadataResult,
 } from "../metadata-store.js";
-import { formatMetadataKeySummaries } from "../metadata-format.js";
+import { formatMetadataKeySummaries, formatMetadataOverview } from "../metadata-format.js";
 import type { DocumentMetadata } from "../metadata.js";
 import { parseMetadataFilter, parseMetadataMatch, type MetadataFilter, type MetadataMatch } from "../metadata-filter.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
@@ -581,6 +584,10 @@ async function showStatus(): Promise<void> {
   }
   if (needsEmbedding > 0) {
     console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'qmd embed')`);
+  }
+  const metadataKeyCount = countMetadataKeys(db);
+  if (metadataKeyCount > 0) {
+    console.log(`  Metadata: ${metadataKeyCount} keys across ${countDocumentsWithMetadata(db)} files (explore with 'qmd collection metadata')`);
   }
   const pendingMetadata = countDocumentsPendingMetadata(db);
   if (pendingMetadata > 0) {
@@ -1819,11 +1826,37 @@ function collectionList(): void {
       console.log(`  ${c.dim}Ignore:${c.reset}   ${yamlColl.ignore.join(', ')}`);
     }
     console.log(`  ${c.dim}Files:${c.reset}    ${coll.active_count}`);
+    const metadataKeyCount = countMetadataKeys(db, [coll.name]);
+    if (metadataKeyCount > 0) {
+      const shownKeys = listMetadataKeys(db, [coll.name], COLLECTION_LIST_METADATA_KEYS).map(overview => overview.key);
+      const hiddenKeys = metadataKeyCount - shownKeys.length;
+      console.log(`  ${c.dim}Metadata:${c.reset} ${shownKeys.join(', ')}${hiddenKeys > 0 ? `, +${hiddenKeys} more` : ''}`);
+    }
     console.log(`  ${c.dim}Updated:${c.reset}  ${timeAgo}`);
     console.log();
   }
 
   closeDb();
+}
+
+/** Key names shown on `collection list`, and keys detailed on `collection show`. */
+const COLLECTION_LIST_METADATA_KEYS = 5;
+
+// The Metadata section of `collection show`: top keys by coverage with a
+// value preview, and a pointer at the drill-down for the rest.
+function collectionShowMetadata(name: string): void {
+  const db = getDb();
+  const result = listMetadata(db, { collection: name, keyLimit: COLLECTION_LIST_METADATA_KEYS, valueLimit: 3 });
+  const documentsWithMetadata = countDocumentsWithMetadata(db, [name]);
+  const pendingMetadata = countDocumentsPendingMetadata(db, [name]);
+  closeDb();
+
+  console.log(formatMetadataOverview(result, {
+    documentsWithMetadata,
+    pendingMetadata,
+    drillDownHint: `qmd collection metadata ${name}`,
+    colors: c,
+  }));
 }
 
 /** Canonical --mask, with --glob as the alias OpenClaw and others already pass (#536). */
@@ -4801,6 +4834,7 @@ if (isMain) {
             const ctxCount = Object.keys(col.context).length;
             console.log(`  Contexts: ${ctxCount}`);
           }
+          collectionShowMetadata(name);
           break;
         }
 
