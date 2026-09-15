@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { openDatabase } from "../src/db.js";
 
 const thisDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(thisDir, "..");
@@ -489,4 +490,60 @@ describe("qmd collection metadata", () => {
     expect(all.stderr).toContain("--all is not an option of 'qmd collection metadata'");
     expect(all.stderr).toContain("Use --all-values, --all-keys, or both");
   }, 30000);
+});
+
+describe("metadata in collection list, show, and status", () => {
+  test("collection list names the top keys and counts the rest", async () => {
+    const { stdout, exitCode } = await runQmd(["collection", "list"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("  Metadata: status, priority, topics, owner, reviewed, +1 more\n");
+  }, 30000);
+
+  test("collection show details the top keys and points at the drill-down", async () => {
+    const { stdout, exitCode } = await runQmd(["collection", "show", "notes"]);
+    expect(exitCode).toBe(0);
+
+    const metadataSection = stdout.slice(stdout.indexOf("  Metadata:"));
+    expect(metadataSection).toBe([
+      "  Metadata: 6 keys, 5 of 6 documents",
+      "    status    string           5 docs   3 distinct  draft (2), published (2), archived (1)",
+      `    priority  number | string  3 docs   3 distinct  types disagree, see: qmd collection metadata notes --match '{"field":"key","operator":"eq","value":"priority"}'`,
+      "    topics    string[]         2 docs  13 distinct  typescript (2), agents (1), architecture (1), ...",
+      "    owner     string           1 doc    1 distinct",
+      "    reviewed  boolean          1 doc    1 distinct  false 1",
+      "    1 more key, see 'qmd collection metadata notes'",
+      "",
+    ].join("\n"));
+  }, 30000);
+
+  test("status summarizes metadata and points at the drill-down", async () => {
+    const { stdout, exitCode } = await runQmd(["status"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("  Metadata: 6 keys across 5 files (explore with 'qmd collection metadata')\n");
+  }, 30000);
+
+  test("warns about pending extraction only within the collections the command reads", async () => {
+    const otherDir = join(testDir, "other");
+    await mkdir(otherDir, { recursive: true });
+    await writeFile(join(otherDir, "aged.md"), "---\nqmd:\n  metadata:\n    status: draft\n---\n\n# Aged\n");
+    expect((await runQmd(["collection", "add", otherDir, "--name", "other"])).exitCode).toBe(0);
+
+    const ageOther = "UPDATE document_metadata SET extraction_version = 0 WHERE document_id IN (SELECT id FROM documents WHERE collection = 'other')";
+    const db = openDatabase(dbPath);
+    db.prepare(ageOther).run();
+    db.close();
+
+    try {
+      const notes = await runQmd(["collection", "metadata", "notes"]);
+      expect(notes.exitCode).toBe(0);
+      expect(notes.stderr).not.toContain("lack current metadata extraction");
+
+      const other = await runQmd(["collection", "metadata", "other"]);
+      expect(other.exitCode).toBe(0);
+      expect(other.stderr).toContain("Warning: 1 document(s) lack current metadata extraction");
+    } finally {
+      // Leave the index as the other tests expect it.
+      expect((await runQmd(["collection", "remove", "other"])).exitCode).toBe(0);
+    }
+  }, 60000);
 });

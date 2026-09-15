@@ -4,8 +4,10 @@
  * reach (string identity, control characters, empty states under a filter).
  */
 
+import * as childProcess from "node:child_process";
+
 import { describe, test, expect } from "vitest";
-import { formatMetadataKeySummaries, type FormatMetadataOptions } from "../src/metadata-format.js";
+import { formatMetadataKeySummaries, formatMetadataOverview, type FormatMetadataOptions } from "../src/metadata-format.js";
 import type { ListMetadataResult, MetadataKeyTypeSummary, MetadataScalar } from "../src/metadata-store.js";
 
 const OPTIONS: FormatMetadataOptions = {
@@ -72,6 +74,21 @@ function compactItems(output: string): { value: MetadataScalar; documents: numbe
 function printedValues(output: string): string[] {
   return output.split("\n").slice(1).filter(line => line !== "").map(line => line.slice(2).replace(/ {2,}\d+$/, ""));
 }
+
+test.skipIf(process.platform === "win32")("a type-conflict hint preserves apostrophes and shell syntax in the metadata key", () => {
+  const result = splitResult(["a", "b"]);
+  const key = "owner'$(printf injected)'s";
+  result.keys[0]!.key = key;
+  const output = formatMetadataOverview(result, { documentsWithMetadata: result.documents, pendingMetadata: 0, drillDownHint: "qmd collection metadata notes" });
+  const command = output.split("types disagree, see: ")[1]!;
+
+  // Stub qmd to capture its arguments. The fixture's substitution is harmless
+  // if quoting regresses, but it must remain literal data in the JSON operand.
+  const argumentsText = childProcess.execFileSync("sh", ["-c", `qmd() { printf '%s\\n' "$@"; }\n${command}`], { encoding: "utf8" });
+  const args = argumentsText.trimEnd().split("\n");
+  expect(args.slice(0, 4)).toEqual(["collection", "metadata", "notes", "--match"]);
+  expect(JSON.parse(args[4]!)).toEqual({ field: "key", operator: "eq", value: key });
+});
 
 describe("formatMetadataKeySummaries values", () => {
   test("prints a plain string bare", () => {

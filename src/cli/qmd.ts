@@ -89,12 +89,15 @@ import {
 import {
   syncDocumentMetadata,
   countDocumentsPendingMetadata,
+  countDocumentsWithMetadata,
+  countMetadataKeys,
   listMetadata,
+  listMetadataCollectionSummaries,
   MetadataBindingBudgetError,
   type ListMetadataOptions,
   type ListMetadataResult,
 } from "../metadata-store.js";
-import { formatMetadataKeySummaries } from "../metadata-format.js";
+import { formatMetadataKeySummaries, formatMetadataOverview } from "../metadata-format.js";
 import type { DocumentMetadata } from "../metadata.js";
 import { parseMetadataFilter, parseMetadataMatch, type MetadataFilter, type MetadataMatch } from "../metadata-filter.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
@@ -581,6 +584,10 @@ async function showStatus(): Promise<void> {
   }
   if (needsEmbedding > 0) {
     console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'qmd embed')`);
+  }
+  const metadataKeyCount = countMetadataKeys(db);
+  if (metadataKeyCount > 0) {
+    console.log(`  Metadata: ${metadataKeyCount} keys across ${countDocumentsWithMetadata(db)} files (explore with 'qmd collection metadata')`);
   }
   const pendingMetadata = countDocumentsPendingMetadata(db);
   if (pendingMetadata > 0) {
@@ -1803,6 +1810,7 @@ function collectionList(): void {
   }
 
   console.log(`${c.bold}Collections (${collections.length}):${c.reset}\n`);
+  const metadataOverviews = listMetadataCollectionSummaries(db, COLLECTION_LIST_METADATA_KEYS);
 
   for (const coll of collections) {
     const updatedAt = coll.last_modified ? new Date(coll.last_modified) : new Date();
@@ -1819,11 +1827,37 @@ function collectionList(): void {
       console.log(`  ${c.dim}Ignore:${c.reset}   ${yamlColl.ignore.join(', ')}`);
     }
     console.log(`  ${c.dim}Files:${c.reset}    ${coll.active_count}`);
+    const metadataOverview = metadataOverviews.get(coll.name);
+    if (metadataOverview) {
+      const shownKeys = metadataOverview.keys.map(overview => overview.key);
+      const hiddenKeys = metadataOverview.totalKeys - shownKeys.length;
+      console.log(`  ${c.dim}Metadata:${c.reset} ${shownKeys.join(', ')}${hiddenKeys > 0 ? `, +${hiddenKeys} more` : ''}`);
+    }
     console.log(`  ${c.dim}Updated:${c.reset}  ${timeAgo}`);
     console.log();
   }
 
   closeDb();
+}
+
+/** Key names shown on `collection list`, and keys detailed on `collection show`. */
+const COLLECTION_LIST_METADATA_KEYS = 5;
+
+// The Metadata section of `collection show`: top keys by coverage with a
+// value preview, and a pointer at the drill-down for the rest.
+function collectionShowMetadata(name: string): void {
+  const db = getDb();
+  const result = listMetadata(db, { collection: name, keyLimit: COLLECTION_LIST_METADATA_KEYS, valueLimit: 3 });
+  const documentsWithMetadata = countDocumentsWithMetadata(db, [name]);
+  const pendingMetadata = countDocumentsPendingMetadata(db, [name]);
+  closeDb();
+
+  console.log(formatMetadataOverview(result, {
+    documentsWithMetadata,
+    pendingMetadata,
+    drillDownHint: `qmd collection metadata ${name}`,
+    colors: c,
+  }));
 }
 
 /** Canonical --mask, with --glob as the alias OpenClaw and others already pass (#536). */
@@ -1937,7 +1971,7 @@ function collectionMetadata(collectionNames: string[], options: ListMetadataOpti
   }
 
   // Discovery always applies the extraction gate, filter or not.
-  warnPendingMetadata(db);
+  warnPendingMetadata(db, collectionNames);
 
   let result: ListMetadataResult;
   try {
@@ -3000,8 +3034,9 @@ function parseCliPredicateFlag<Predicate>(raw: unknown, predicateFlag: CliPredic
 
 // Filtered search excludes documents without current metadata extraction;
 // tell the user when that makes results incomplete.
-function warnPendingMetadata(db: Database): void {
-  const pendingMetadata = countDocumentsPendingMetadata(db);
+/** Warn about documents the extraction gate excludes, within the collections the command reads. */
+function warnPendingMetadata(db: Database, collectionNames: string[]): void {
+  const pendingMetadata = countDocumentsPendingMetadata(db, collectionNames.length > 0 ? collectionNames : undefined);
   if (pendingMetadata === 0) return;
   process.stderr.write(`${c.yellow}Warning: ${pendingMetadata} document(s) lack current metadata extraction and are excluded from filtered results. Run 'qmd update'.${c.reset}\n`);
 }
@@ -3013,7 +3048,7 @@ function search(query: string, opts: OutputOptions): void {
   // Use default collections if none specified
   const collectionNames = resolveCollectionFilter(opts.collection, true);
 
-  if (opts.filter) warnPendingMetadata(db);
+  if (opts.filter) warnPendingMetadata(db, collectionNames);
 
   // Use large limit for --all, otherwise fetch more than needed and let outputResults filter
   const fetchLimit = opts.all ? 100000 : Math.max(50, opts.limit * 2);
@@ -3064,7 +3099,7 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
   const collectionNames = resolveCollectionFilter(opts.collection, true);
 
   checkIndexHealth(store.db);
-  if (opts.filter) warnPendingMetadata(store.db);
+  if (opts.filter) warnPendingMetadata(store.db, collectionNames);
 
   await withLLMSession(async () => {
     let results = await vectorSearchQuery(store, query, {
@@ -3109,7 +3144,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
   const collectionNames = resolveCollectionFilter(opts.collection, true);
 
   checkIndexHealth(store.db);
-  if (opts.filter) warnPendingMetadata(store.db);
+  if (opts.filter) warnPendingMetadata(store.db, collectionNames);
 
   // Check for structured query syntax (lex:/vec:/hyde:/intent: prefixes)
   const parsed = parseStructuredQuery(query);
@@ -4809,6 +4844,7 @@ if (isMain) {
             const ctxCount = Object.keys(col.context).length;
             console.log(`  Contexts: ${ctxCount}`);
           }
+          collectionShowMetadata(name);
           break;
         }
 

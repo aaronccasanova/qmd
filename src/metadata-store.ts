@@ -175,9 +175,11 @@ function isDocumentMetadataCurrent(db: Database, documentId: number): boolean {
 /**
  * Count active documents without a current, error-free metadata extraction.
  * These documents are excluded from filtered search until `qmd update` runs.
+ * Scoped to `collectionNames` when given, otherwise the whole index.
  */
-export function countDocumentsPendingMetadata(db: Database): number {
-  const row = db.prepare(`
+export function countDocumentsPendingMetadata(db: Database, collectionNames?: string[]): number {
+  const params: SQLiteValue[] = [METADATA_EXTRACTION_VERSION];
+  let sql = `
     SELECT COUNT(*) as c FROM documents d
     WHERE d.active = 1
       AND NOT EXISTS (
@@ -185,8 +187,12 @@ export function countDocumentsPendingMetadata(db: Database): number {
         WHERE dm.document_id = d.id
           AND dm.extraction_version = ?
           AND dm.extraction_error IS NULL
-      )
-  `).get(METADATA_EXTRACTION_VERSION) as { c: number };
+      )`;
+  if (collectionNames) {
+    sql += ` AND d.collection IN (SELECT value FROM json_each(?))`;
+    params.push(JSON.stringify(collectionNames));
+  }
+  const row = db.prepare(sql).get(...params) as { c: number };
   return row.c;
 }
 
@@ -571,17 +577,22 @@ function compareBinary(left: string, right: string): number {
 
 /** Distinct metadata keys declared by active, extracted documents in scope. */
 export function countMetadataKeys(db: Database, collectionNames?: string[]): number {
-  return countKeys(db, buildRegion(buildEligibleCte(collectionNames, undefined)));
+  const region = buildRegion(buildEligibleCte(collectionNames, undefined));
+  const row = db.prepare(`
+    ${region.withSql}
+    SELECT COUNT(DISTINCT mv.key) AS c ${region.fromSql} WHERE mv.ordinal = 0
+  `).get(...region.withParams, ...region.fromParams) as { c: number };
+  return row.c;
 }
 
 /** Active, extracted documents in scope that declare at least one metadata key. */
 export function countDocumentsWithMetadata(db: Database, collectionNames?: string[]): number {
-  const region = buildRegion(buildEligibleCte(collectionNames, undefined));
+  const eligible = buildEligibleCte(collectionNames, undefined);
   const row = db.prepare(`
-    ${region.withSql}
-    SELECT COUNT(DISTINCT mv.document_id) AS c
-    ${region.fromSql}
-  `).get(...region.withParams, ...region.fromParams) as { c: number };
+    ${eligible.withSql}
+    SELECT COUNT(*) AS c FROM eligible e
+    WHERE EXISTS (SELECT 1 FROM document_metadata_values mv WHERE mv.document_id = e.document_id)
+  `).get(...eligible.withParams) as { c: number };
   return row.c;
 }
 
