@@ -43,8 +43,11 @@ import {
   initializeMetadataSchema,
   syncDocumentMetadata,
   countDocumentsPendingMetadata,
+  countMetadataKeys,
   getMetadataByFilepath,
+  listMetadataKeys,
   parseMetadataJson,
+  type MetadataKeyOverview,
 } from "./metadata-store.js";
 
 // =============================================================================
@@ -2528,7 +2531,18 @@ export type CollectionInfo = {
   pattern: string | null;
   documents: number;
   lastUpdated: string;
+  /** Distinct metadata keys declared in this collection. */
+  metadataKeyCount: number;
+  /**
+   * The most covered metadata keys in this collection, with coverage and
+   * types, by coverage. Windowed to STATUS_METADATA_KEY_LIMIT; `listMetadata`
+   * pages through the rest.
+   */
+  metadataKeys: MetadataKeyOverview[];
 };
+
+/** Keys a status view names per collection before pointing at discovery. */
+export const STATUS_METADATA_KEY_LIMIT = 10;
 
 export type IndexStatus = {
   totalDocuments: number;
@@ -5260,6 +5274,8 @@ export function getStatus(db: Database, model: string = DEFAULT_EMBED_MODEL): In
       pattern: config?.pattern ?? null,
       documents: row.active_count,
       lastUpdated: row.last_doc_update || new Date().toISOString(),
+      metadataKeyCount: countMetadataKeys(db, [row.name]),
+      metadataKeys: listMetadataKeys(db, [row.name], STATUS_METADATA_KEY_LIMIT),
     };
   });
 
