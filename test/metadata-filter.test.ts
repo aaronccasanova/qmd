@@ -8,7 +8,10 @@ import { openDatabase } from "../src/db.js";
 import type { Database } from "../src/db.js";
 import {
   parseMetadataFilter,
+  parseMetadataMatch,
   compileMetadataFilter,
+  type FilterScope,
+  compileMetadataMatch,
   MetadataFilterError,
   METADATA_FILTER_LIMITS,
   type MetadataFilter,
@@ -159,6 +162,60 @@ describe("parseMetadataFilter", () => {
   });
 });
 
+describe("parseMetadataMatch", () => {
+  test("accepts the filter grammar with 'key' and 'value' as the condition fields", () => {
+    const match = {
+      operator: "and",
+      operands: [
+        { field: "key", operator: "prefix", value: "mem-" },
+        { operator: "or", operands: [
+          { field: "value", operator: "gte", value: 3 },
+          { field: "value", operator: "type", value: "boolean" },
+          { operator: "not", operand: { field: "value", operator: "in", value: ["Draft"], caseInsensitive: true } },
+        ] },
+      ],
+    };
+    expect(parseMetadataMatch(match)).toEqual(match);
+  });
+
+  test("rejects other fields and the two set operators, naming the match", () => {
+    const cases: [unknown, RegExp][] = [
+      [{ field: "topics", operator: "eq", value: "x" }, /^Invalid metadata match at \$: 'topics' is not a field of a metadata entry, expected 'key' or 'value'$/],
+      [{ field: "value", operator: "exists", value: true }, /^Invalid metadata match at \$: 'exists' has no meaning for a single metadata entry$/],
+      [{ field: "key", operator: "all", value: ["a"] }, /'all' has no meaning for a single metadata entry/],
+      [{ operator: "not", operand: { field: "value", operator: "eq" } }, /^Invalid metadata match at \$\.operand: 'eq' requires a 'value'$/],
+      ["nope", /^Invalid metadata match at \$: each filter node must be an object$/],
+    ];
+    for (const [input, expected] of cases) {
+      expect(() => parseMetadataMatch(input)).toThrow(expected);
+      expect(() => parseMetadataMatch(input)).toThrow(MetadataFilterError);
+    }
+    // The filter keeps its own name.
+    expect(() => parseMetadataFilter("nope")).toThrow(/^Invalid metadata filter at \$:/);
+  });
+});
+
+describe("compileMetadataMatch", () => {
+  test("compiles to a predicate over the row alias with every operand bound", () => {
+    const compiled = compileMetadataMatch(parseMetadataMatch({
+      operator: "and",
+      operands: [
+        { field: "key", operator: "eq", value: "k'; --" },
+        { field: "value", operator: "suffix", value: "V'; --", caseInsensitive: true },
+        { field: "value", operator: "nin", value: [1, 2] },
+      ],
+    }), "row");
+
+    expect(compiled.sql).not.toContain("'; --");
+    expect(compiled.sql).not.toContain("EXISTS");
+    expect(compiled.sql).toContain("row.key = ?");
+    expect(compiled.sql).toContain("lower(row.text_value)");
+    expect(compiled.sql).toContain("row.number_value NOT IN (?, ?)");
+    // The suffix binds its operand's UTF-8 byte length ahead of the operand.
+    expect(compiled.params).toEqual(["k'; --", 6, "v'; --", 1, 2]);
+  });
+});
+
 // =============================================================================
 // SQL compilation and semantics
 // =============================================================================
@@ -189,8 +246,8 @@ describe("compileMetadataFilter semantics", () => {
     return documentId;
   }
 
-  function matchPaths(filter: MetadataFilter): string[] {
-    const compiled = compileMetadataFilter(parseMetadataFilter(filter), "d");
+  function matchPathsIn(filter: MetadataFilter, scope: FilterScope): string[] {
+    const compiled = compileMetadataFilter(parseMetadataFilter(filter), "d", scope);
     const rows = db.prepare(`
       SELECT d.path FROM documents d
       JOIN document_metadata dm ON dm.document_id = d.id
@@ -200,6 +257,13 @@ describe("compileMetadataFilter semantics", () => {
       ORDER BY d.path
     `).all(...compiled.params) as { path: string }[];
     return rows.map(row => row.path);
+  }
+
+  /** Both scopes are one semantics in two SQL forms, so every case checks they agree. */
+  function matchPaths(filter: MetadataFilter): string[] {
+    const candidates = matchPathsIn(filter, "candidates");
+    expect(matchPathsIn(filter, "corpus"), `corpus scope for ${JSON.stringify(filter)}`).toEqual(candidates);
+    return candidates;
   }
 
   test("eq matches each scalar type exactly, without coercion", () => {
@@ -448,6 +512,36 @@ describe("compileMetadataFilter semantics", () => {
         expect(plan.some(detail => detail.includes(seek)), `${label}: ${plan.join(" | ")}`).toBe(true);
         expect(plan.some(detail => detail.includes("key=?") && !detail.includes("document_id=?")), `${label} walks a key range: ${plan.join(" | ")}`).toBe(false);
       }
+    }
+  });
+
+  test("the corpus scope compiles each condition to one uncorrelated document set", () => {
+    for (let index = 0; index < 64; index++) {
+      insertDoc(`d${index}.md`, { status: index % 2 ? "published" : "draft", priority: index });
+    }
+    const filter = parseMetadataFilter({
+      operator: "and",
+      operands: [
+        { field: "priority", operator: "gt", value: 3 },
+        { operator: "not", operand: { field: "status", operator: "exists", value: false } },
+      ],
+    });
+    const compiled = compileMetadataFilter(filter, "d", "corpus");
+    expect(compiled.sql).toBe(
+      "(d.id IN (SELECT mv.document_id FROM document_metadata_values mv WHERE mv.key = ? AND mv.value_type = 'number' AND mv.number_value > ?)" +
+      " AND NOT NOT d.id IN (SELECT mv.document_id FROM document_metadata_values mv WHERE mv.key = ?))",
+    );
+    expect(compiled.params).toEqual(["priority", 3, "status"]);
+
+    for (const statistics of [false, true]) {
+      if (statistics) db.exec("ANALYZE");
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM documents d WHERE ${compiled.sql}`)
+        .all(...compiled.params) as { detail: string }[])
+        .map(row => row.detail);
+      // The document sets are built once (LIST SUBQUERY), by covering index, and probed per document.
+      expect(plan.filter(step => step.includes("LIST SUBQUERY"))).toHaveLength(2);
+      expect(plan.some(step => step.includes(" EXISTS ")), plan.join(" | ")).toBe(false);
+      expect(plan.some(step => step.includes("idx_metadata_number_lookup (key=? AND number_value>?)")), plan.join(" | ")).toBe(true);
     }
   });
 
