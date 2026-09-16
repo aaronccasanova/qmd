@@ -8,7 +8,9 @@ import { openDatabase } from "../src/db.js";
 import type { Database } from "../src/db.js";
 import {
   parseMetadataFilter,
+  parseMetadataMatch,
   compileMetadataFilter,
+  compileMetadataMatch,
   MetadataFilterError,
   METADATA_FILTER_LIMITS,
   type MetadataFilter,
@@ -156,6 +158,60 @@ describe("parseMetadataFilter", () => {
       value: Array.from({ length: METADATA_FILTER_LIMITS.maxMembershipValues + 1 }, (_, i) => i),
     };
     expect(() => parseMetadataFilter(manyValues)).toThrow(/values/);
+  });
+});
+
+describe("parseMetadataMatch", () => {
+  test("accepts the filter grammar with 'key' and 'value' as the condition fields", () => {
+    const match = {
+      operator: "and",
+      operands: [
+        { field: "key", operator: "prefix", value: "mem-" },
+        { operator: "or", operands: [
+          { field: "value", operator: "gte", value: 3 },
+          { field: "value", operator: "type", value: "boolean" },
+          { operator: "not", operand: { field: "value", operator: "in", value: ["Draft"], caseInsensitive: true } },
+        ] },
+      ],
+    };
+    expect(parseMetadataMatch(match)).toEqual(match);
+  });
+
+  test("rejects other fields and the two set operators, naming the match", () => {
+    const cases: [unknown, RegExp][] = [
+      [{ field: "topics", operator: "eq", value: "x" }, /^Invalid metadata match at \$: 'topics' is not a field of a metadata entry, expected 'key' or 'value'$/],
+      [{ field: "value", operator: "exists", value: true }, /^Invalid metadata match at \$: 'exists' has no meaning for a single metadata entry$/],
+      [{ field: "key", operator: "all", value: ["a"] }, /'all' has no meaning for a single metadata entry/],
+      [{ operator: "not", operand: { field: "value", operator: "eq" } }, /^Invalid metadata match at \$\.operand: 'eq' requires a 'value'$/],
+      ["nope", /^Invalid metadata match at \$: each filter node must be an object$/],
+    ];
+    for (const [input, expected] of cases) {
+      expect(() => parseMetadataMatch(input)).toThrow(expected);
+      expect(() => parseMetadataMatch(input)).toThrow(MetadataFilterError);
+    }
+    // The filter keeps its own name.
+    expect(() => parseMetadataFilter("nope")).toThrow(/^Invalid metadata filter at \$:/);
+  });
+});
+
+describe("compileMetadataMatch", () => {
+  test("compiles to a predicate over the row alias with every operand bound", () => {
+    const compiled = compileMetadataMatch(parseMetadataMatch({
+      operator: "and",
+      operands: [
+        { field: "key", operator: "eq", value: "k'; --" },
+        { field: "value", operator: "suffix", value: "V'; --", caseInsensitive: true },
+        { field: "value", operator: "nin", value: [1, 2] },
+      ],
+    }), "row");
+
+    expect(compiled.sql).not.toContain("'; --");
+    expect(compiled.sql).not.toContain("EXISTS");
+    expect(compiled.sql).toContain("row.key = ?");
+    expect(compiled.sql).toContain("lower(row.text_value)");
+    expect(compiled.sql).toContain("row.number_value NOT IN (?, ?)");
+    // The suffix binds its operand's UTF-8 byte length ahead of the operand.
+    expect(compiled.params).toEqual(["k'; --", 6, "v'; --", 1, 2]);
   });
 });
 
