@@ -463,7 +463,7 @@ describe("MCP and HTTP metadata filter", () => {
     expect(empty.json.result.isError).toBeFalsy();
     expect(empty.json.result.structuredContent).toMatchObject({ documents: 3, filteredDocuments: 0, totalKeys: 0 });
     expect(empty.json.result.content[0].text).toBe(
-      "filter: 0 of 3 documents\n\nNo metadata matches. Call without match/filter to see every key, or check the status tool for collections with metadata.",
+      "filter: 0 of 3 documents\n\nNo metadata matches. Call without match/filter to see which keys exist, or check the status tool for collections with metadata.",
     );
 
     const overBudget = await callTool("metadata", buildWidePredicates());

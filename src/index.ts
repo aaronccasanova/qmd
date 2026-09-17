@@ -94,9 +94,6 @@ import {
   listMetadata as storeListMetadata,
   MetadataBindingBudgetError,
   MetadataOptionError,
-  DEFAULT_METADATA_KEY_LIMIT,
-  DEFAULT_METADATA_VALUE_LIMIT,
-  METADATA_SQL_BINDING_BUDGET,
   type ListMetadataOptions,
   type ListMetadataResult,
   type MetadataKeySummary,
@@ -174,13 +171,7 @@ export type {
   MetadataValueCount,
   MetadataKeyOverview,
 };
-export {
-  MetadataBindingBudgetError,
-  MetadataOptionError,
-  DEFAULT_METADATA_KEY_LIMIT,
-  DEFAULT_METADATA_VALUE_LIMIT,
-  METADATA_SQL_BINDING_BUDGET,
-};
+export { MetadataBindingBudgetError, MetadataOptionError };
 
 // Re-export the internal Store type for advanced consumers
 export type { InternalStore };
@@ -361,7 +352,7 @@ export interface QMDStore {
    * snapshot. Throws MetadataFilterError for an invalid predicate,
    * MetadataOptionError for an option outside its domain, and
    * MetadataBindingBudgetError when `filter` and `match` together bind more
-   * SQL parameters than METADATA_SQL_BINDING_BUDGET.
+   * SQL parameters than one statement allows.
    */
   listMetadata(options?: ListMetadataOptions): Promise<ListMetadataResult>;
 

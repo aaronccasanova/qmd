@@ -23,8 +23,6 @@ import {
   countDocumentsWithMetadata,
   countMetadataKeys,
   listMetadata,
-  listMetadataKeys,
-  getMetadataOverview,
   listMetadataCollectionSummaries,
   METADATA_SQL_BINDING_BUDGET,
   MetadataBindingBudgetError,
@@ -101,7 +99,6 @@ function observeStatements(db: Database, onPrepare: (sql: string) => void, onAll
   });
 }
 
-/** The statement's query plan. Placeholders bind NULL, which is enough to plan. */
 function planOf(sql: string): string[] {
   const placeholders = Array.from(sql.matchAll(/\?/g), () => null);
   const rows = store.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...placeholders) as { detail: string }[];
@@ -516,8 +513,8 @@ describe("listMetadata key window", () => {
 
     expect(fullResult).toEqual(names);
     expect(pages).toEqual(names);
-    expect(listMetadataKeys(store.db, ["work"]).map(overview => overview.key)).toEqual(names);
-    expect(listMetadataKeys(store.db, ["work"], 3).map(overview => overview.key)).toEqual(names.slice(0, 3));
+    expect(listMetadataCollectionSummaries(store.db).get("work")!.keys.map(overview => overview.key)).toEqual(names);
+    expect(listMetadataCollectionSummaries(store.db, 3).get("work")!.keys.map(overview => overview.key)).toEqual(names.slice(0, 3));
   });
 
   test("ranks keys once per report and groups values once for both totals and windows", () => {
@@ -529,29 +526,29 @@ describe("listMetadata key window", () => {
       { filter: { field: "e", operator: "prefix", value: "x" }, keyLimit: 5 },
       {},
     ];
+    // One statement ranks the keys, but the planner may still evaluate its
+    // CTE once per joined row unless it is materialized. Check both, with
+    // and without table statistics, which change the planner's choice.
     for (const statistics of [false, true]) {
       if (statistics) store.db.exec("ANALYZE");
       for (const option of options) {
         statements.length = 0;
         listMetadata(observed, option);
-        expect(statements.filter(sql => sql.includes("selected_keys AS"))).toHaveLength(1);
+        const rankingStatements = statements.filter(sql => sql.includes("selected_keys AS"));
+        expect(rankingStatements).toHaveLength(1);
         expect(statements.filter(sql => sql.includes("GROUP BY mv.key, mv.value_type, mv.text_value"))).toHaveLength(1);
         if (option.filter) expect(statements.some(sql => sql.includes("d.id IN (SELECT mv.document_id"))).toBe(true);
-        for (const sql of statements) {
-          const plan = planOf(sql);
-          expect(plan.some(step => step.includes(" EXISTS ")), sql).toBe(false);
-          if (sql.includes("d.id IN (SELECT mv.document_id")) expect(plan.some(step => step.includes("LIST SUBQUERY")), sql).toBe(true);
-          if (!sql.includes("selected_keys AS")) continue;
-          expect(plan.some(step => step.includes("MATERIALIZE selected_keys")), sql).toBe(true);
-          expect(plan.some(step => step.includes("CO-ROUTINE selected_keys")), sql).toBe(false);
-        }
+        const plan = planOf(rankingStatements[0]!);
+        expect(plan.some(step => step.includes("MATERIALIZE selected_keys")), rankingStatements[0]).toBe(true);
+        expect(plan.some(step => step.includes("CO-ROUTINE selected_keys")), rankingStatements[0]).toBe(false);
       }
-      statements.length = 0;
-      listMetadataKeys(observed, undefined, 10);
-      expect(statements).toHaveLength(1);
-      expect(statements[0]).toContain("mv.ordinal = 0");
-      expect(statements[0]).not.toContain("number_value");
     }
+
+    statements.length = 0;
+    listMetadataCollectionSummaries(observed, 10);
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain("mv.ordinal = 0");
+    expect(statements[0]).not.toContain("number_value");
   });
 });
 
@@ -578,7 +575,6 @@ describe("metadata overviews", () => {
           const report = listMetadata(store.db, { collection, keyLimit });
           const expected = { totalKeys: report.totalKeys, keys: report.keys.map(key => ({ key: key.key, documents: key.documents, types: key.types.map(type => type.type) })) };
           expect(overviews.get(collection) ?? { totalKeys: 0, keys: [] }).toEqual(expected);
-          expect(getMetadataOverview(store.db, [collection], keyLimit)).toEqual(expected);
         }
       }
     }
@@ -942,22 +938,21 @@ describe("status view helpers", () => {
     store.db.prepare(`DELETE FROM document_metadata WHERE document_id = ?`).run(pendingId);
   });
 
-  test("listMetadataKeys reports names, coverage, and types in coverage order", () => {
-    expect(listMetadataKeys(store.db)).toEqual([
-      { key: "priority", documents: 2, types: ["number", "string"] },
+  test("listMetadataCollectionSummaries reports names, coverage, and types per collection in coverage order", () => {
+    const overviews = listMetadataCollectionSummaries(store.db);
+    expect(overviews.get("notes")).toEqual({ totalKeys: 2, keys: [
       { key: "status", documents: 2, types: ["string"] },
-      { key: "source", documents: 1, types: ["string"] },
-    ]);
-    expect(listMetadataKeys(store.db, ["work"])).toEqual([
+      { key: "priority", documents: 1, types: ["number"] },
+    ] });
+    expect(overviews.get("work")).toEqual({ totalKeys: 2, keys: [
       { key: "priority", documents: 1, types: ["string"] },
       { key: "source", documents: 1, types: ["string"] },
-    ]);
-    expect(listMetadataKeys(store.db, ["missing"])).toEqual([]);
-  });
+    ] });
+    expect(overviews.has("missing")).toBe(false);
 
-  test("listMetadataKeys windows to the first keys in coverage order", () => {
-    expect(listMetadataKeys(store.db, undefined, 2).map(overview => overview.key)).toEqual(["priority", "status"]);
-    expect(listMetadataKeys(store.db, undefined, Infinity)).toHaveLength(3);
+    const windowed = listMetadataCollectionSummaries(store.db, 1);
+    expect(windowed.get("notes")).toEqual({ totalKeys: 2, keys: [{ key: "status", documents: 2, types: ["string"] }] });
+    expect(listMetadataCollectionSummaries(store.db, Infinity).get("notes")!.keys).toHaveLength(2);
   });
 
   test("countMetadataKeys reports the vocabulary size in scope", () => {

@@ -1992,7 +1992,7 @@ function collectionMetadata(collectionNames: string[], options: ListMetadataOpti
     keyOffset: options.keyOffset ?? 0,
     keyOffsetLabel: "--key-offset",
     emptyMessage: selection
-      ? "No metadata matches. Run 'qmd collection metadata' without --match or --filter to see every key."
+      ? "No metadata matches. Run 'qmd collection metadata' without --match or --filter to see which keys exist."
       : "No metadata found. Add qmd.metadata frontmatter and run 'qmd update'.",
     colors: c,
   }));
@@ -3032,9 +3032,9 @@ function parseCliPredicateFlag<Predicate>(raw: unknown, predicateFlag: CliPredic
   }
 }
 
-// Filtered search excludes documents without current metadata extraction;
-// tell the user when that makes results incomplete.
-/** Warn about documents the extraction gate excludes, within the collections the command reads. */
+// Filtered search and discovery exclude documents without current metadata
+// extraction; tell the user when that makes results incomplete, scoped to
+// the collections the command reads.
 function warnPendingMetadata(db: Database, collectionNames: string[]): void {
   const pendingMetadata = countDocumentsPendingMetadata(db, collectionNames.length > 0 ? collectionNames : undefined);
   if (pendingMetadata === 0) return;

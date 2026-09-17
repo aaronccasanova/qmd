@@ -393,7 +393,7 @@ describe("qmd collection metadata", () => {
     expect(stdout).toBe([
       "filter: 1 of 6 documents",
       "",
-      "No metadata matches. Run 'qmd collection metadata' without --match or --filter to see every key.",
+      "No metadata matches. Run 'qmd collection metadata' without --match or --filter to see which keys exist.",
       "",
     ].join("\n"));
   }, 30000);

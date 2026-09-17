@@ -94,7 +94,8 @@ Although the tool works perfectly fine when you just tell your agent to use it o
 - `query` — Search with typed sub-queries (`lex`/`vec`/`hyde`), combined via RRF + reranking
 - `get` — Retrieve a document by path or docid (with fuzzy matching suggestions)
 - `multi_get` — Batch retrieve by glob pattern, comma-separated list, or docids
-- `status` — Index health and collection info
+- `status` — Index health and collection info, including each collection's top metadata keys
+- `metadata` — Discover metadata keys, types, and value counts to filter on
 
 **Claude Desktop configuration** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
@@ -199,6 +200,9 @@ Point any MCP client at `http://localhost:8181/mcp` to connect.
 | `get` | `maxLines` | number | Limit returned lines |
 | `get` | `lineNumbers` | boolean | Prefix lines with numbers (default **true**) |
 | `multi_get` | `pattern` | string | Glob pattern or comma-separated list |
+| `multi_get` | `maxBytes` | number | Skip files larger than N (default 10240) |
+| `multi_get` | `maxLines` | number | Limit lines per file |
+| `multi_get` | `lineNumbers` | boolean | Prefix lines with numbers (default **true**) |
 | `metadata` | `collections` | string[] | Restrict discovery to collection names (default: the collections `query` searches) |
 | `metadata` | `match` | object | Report only metadata entries matching this condition (same AST as `filter`, with `field` naming the entry's `key` or `value`) |
 | `metadata` | `filter` | object | Count only documents matching this filter (same AST as `query`) |
@@ -208,9 +212,6 @@ Point any MCP client at `http://localhost:8181/mcp` to connect.
 | `metadata` | `valueOffset` | number | Values skipped per key and type before the window, in `sort` order (default 0) |
 | `metadata` | `sort` | string | `count` (default) or `value` |
 | `metadata` | `minCount` | number | Hide values held by fewer documents (default 1) |
-| `multi_get` | `maxBytes` | number | Skip files larger than N (default 10240) |
-| `multi_get` | `maxLines` | number | Limit lines per file |
-| `multi_get` | `lineNumbers` | boolean | Prefix lines with numbers (default **true**) |
 
 Unknown parameters are silently ignored (not rejected) — double-check names if
 results seem unscoped. The HTTP `/query` and `/search` endpoints return
@@ -1001,16 +1002,16 @@ Semantics:
 Guarantees and limits:
 
 - Every returned result satisfies the filter, before RRF fusion and reranking.
-- Like collection filtering, highly selective filters are best-effort for top-K completeness: backends over-fetch and post-filter, so a very selective filter can return fewer than `limit` results.
+- Highly selective filters can return fewer than `limit` results. Lexical search filters a bounded over-fetch window; vector search scans the filter-eligible set exactly when it holds at most 20,000 chunk vectors, and above that over-fetches and post-filters.
 - Filtered search only considers documents whose metadata has been extracted (run `qmd update` after upgrading; `qmd status` shows the pending count).
 
 JSON output (`--format json`), the SDK, MCP structured results, and the HTTP endpoints include each result's indexed metadata.
 
 ### Metadata Discovery
 
-Filtering is only useful if you know what to filter on. Discovery reports the metadata keys, types, and value counts already in the index, turning "what dimensions exist" into a well-shaped filter in a few steps. It reads the same tables filtering reads: no re-indexing, and every value it reports is one an `eq` filter can match.
+Filtering is only useful if you know what to filter on. Discovery reports the metadata keys, types, and value counts already in the index, so a filter can be written from what is indexed instead of guessed. It reads the same tables filtering reads: no re-indexing, and every value it reports is one an `eq` filter can match.
 
-Same metadata, different unit. `--filter` narrows **documents** by their metadata and decides which are counted. `--match` narrows **the metadata itself** and decides which entries are reported. Show metadata matching X from documents filtered by Y. Both take the predicate AST above, applied to a different record. A condition tests one `field` of the record under evaluation: in a filter the record is a document and `field` names one of its metadata keys, in a match the record is a metadata entry and `field` is `"key"` (the entry's key name) or `"value"` (its value). Every operator from the filter language applies, including `type`, the text operators, `caseInsensitive`, and `and`/`or`/`not` composition. Only `exists` and `all` are rejected, as they have no meaning for a single entry.
+The command is one sentence: show metadata matching X for documents filtered by Y. `--filter` narrows **documents** by their metadata (same AST as search) and decides which are counted. `--match` narrows **the metadata itself** and decides which entries are reported. It takes the same AST, evaluated against each metadata entry instead of each document: a condition's `field` is `"key"` (the entry's key name) or `"value"` (its value). Every operator applies, including `type`, the text operators, `caseInsensitive`, and `and`/`or`/`not`. Only `exists` and `all` are rejected, as they have no meaning for a single entry.
 
 | `--match` | Question answered |
 |-----------|-------------------|
@@ -1027,7 +1028,7 @@ Same metadata, different unit. `--filter` narrows **documents** by their metadat
 Start wide and narrow:
 
 ```sh
-# Which keys does this collection use? (also shown by `qmd collection show notes`)
+# Which keys does this collection use? (`qmd collection show notes` previews the top five)
 qmd collection metadata notes
 
 # Everything about one key: coverage, distinct count, top values
@@ -1088,39 +1089,7 @@ reviewed  boolean  480 of 480 documents
   true 61  false 419
 ```
 
-A reverse lookup answers "where does this value live" by returning every key that holds it, here a scalar key and an array key:
-
-```sh
-qmd collection metadata notes --match '{"field":"value","operator":"eq","value":"docs-team"}'
-```
-
-```
-owner  string  212 of 480 documents  1 distinct
-  docs-team  212
-
-reviewers  string[]  97 of 480 documents  1 distinct
-  docs-team  97
-```
-
-A match on the value field selects values, not documents, so a numeric condition narrows the range it reports along with the values. Here a document holding `[1, 5]` would contribute only the `5`:
-
-```sh
-qmd collection metadata notes --match '{
-  "operator": "and",
-  "operands": [
-    { "field": "key", "operator": "eq", "value": "priority" },
-    { "field": "value", "operator": "gte", "value": 3 }
-  ]
-}'
-```
-
-```
-priority  number  153 of 480 documents  3 distinct
-  min 3  median 3  max 5
-  3 (88)  4 (50)  5 (15)
-```
-
-With `--filter`, the output opens with a `filter:` line stating how many documents pass, and every key's coverage is measured against that population rather than the whole collection, so the numbers you read are the numbers a filtered search would see:
+With `--filter`, the output opens with a `filter:` line stating how many documents pass, and every coverage count is measured against that population rather than the whole collection — the numbers a filtered search would see:
 
 ```sh
 qmd collection metadata notes \
@@ -1141,29 +1110,28 @@ topics  string[]  260 of 312 documents  811 distinct
 806 more values, use --value-limit <n>, --value-offset <n>, or --all-values
 ```
 
-Two windows bound the key and value lists, and both page. The key window decides which keys are aggregated in detail and the value window decides how many values come back per key and type. Exact counts, medians, and ordering still process the relevant rows. The windows do not bound query work or the contributing collection lists. `--key-limit <n>` (default 50) with `--key-offset <n>` windows the keys, in coverage order, and `--all-keys` removes the window. `--value-limit <n>` (default 10) with `--value-offset <n>` windows the values of each key and type, in `--sort` order, and `--all-values` removes the window. `--sort count|value` orders values (count descending by default, value ascending for ranges and dates), and `--min-count <n>` drops the long tail. Omitting the collection name covers the default collections, exactly as an unscoped search does.
-
-Rules that matter when reading the output:
-
-- **Counts are documents, not values.** A document with `topics: [a, b]` contributes one to each. Coverage is "documents declaring this key", out of the documents the filter admits when there is one.
-- **Truncation is never silent.** Every windowed list ends with the exact remainder and the flags that reach it. Structured results carry `totalKeys` and `remainingKeys` for the key window and `distinctValues` and `remainingValues` per type for the value window.
-- **A bare string is exactly the value.** A string prints as-is only when nothing else could be read from it. A value that is empty, padded, contains a quote, a backslash, a control character, a line separator, or a comma or parenthesis (the delimiters of the compact `value (count)` list), or that reads as a number, boolean, or null (`"42"`, `"true"`), prints as a JSON string with every control character escaped, in both layouts, so `"a (1), b" (1)` is one value and never two.
-- **One result, one snapshot.** Every count in a result is read from the same database state, even while another process is indexing.
-- **Numbers report min, median, and max**, plus the enumerated values when they fit, which is enough to write a sound `gt`/`lt` threshold in one call.
-- **Discovery sees exactly what filtering sees.** Same extraction gate, same active-document rule, same collection scope. Documents still pending extraction are reported on stderr and excluded until `qmd update` runs.
-- **Type conflicts are reported, not resolved.** Metadata is validated one document at a time. Nothing requires two documents to agree on a key's type, whether they sit in the same collection or in different ones, so `priority: 3` in one file and `priority: high` in another both index. Discovery splits such a key by type and gives each type its own document count, which tells you how much of the corpus a typed filter would reach. Within one collection:
+Two windows page the key and value lists. Each windowed list ends with the exact remainder and the flags that reach it:
 
 ```sh
-qmd collection metadata work --match '{"field":"key","operator":"eq","value":"priority"}'
+--key-limit <n>      # Keys reported, in coverage order (default 50)
+--key-offset <n>     # Keys skipped before the window
+--all-keys           # Remove the key window
+--value-limit <n>    # Values reported per key and type (default 10)
+--value-offset <n>   # Values skipped per key and type, in --sort order
+--all-values         # Remove the value window
+--sort count|value   # Order values by document count (default) or by value
+--min-count <n>      # Drop values held by fewer documents
 ```
 
-```
-priority  number | string  1,222 of 1,620 documents
-  number     18 docs  min 1  median 2  max 3
-  string  1,204 docs  high (700), medium (380), low (124)
-```
+Omitting the collection name covers the default collections, exactly as an unscoped search does.
 
-Across collections, each type also names where it comes from:
+Reading the output:
+
+- **Counts are documents, not values.** A document with `topics: [a, b]` contributes one to each. Coverage is "documents declaring this key", out of the documents the filter admits when there is one.
+- **A bare string is exactly the value.** A string whose bare form could be read as something else (`"42"`, `""`, `"a, b"`) prints as a JSON string, so paste it into a filter as the JSON string it is.
+- **Numbers report min, median, and max**, plus the enumerated values when they fit, which is enough to write a `gt`/`lt` threshold in one call.
+- **Discovery sees exactly what filtering sees.** Same extraction gate, same active-document rule, same collection scope, and every count in a result comes from one database snapshot. Documents still pending extraction are reported on stderr and excluded until `qmd update` runs.
+- **Type conflicts are reported, not resolved.** Metadata is validated one document at a time, so `priority: 3` in one file and `priority: high` in another both index, within one collection or across several. Discovery splits such a key by type, each with its own document count and (across collections) its contributing collections:
 
 ```sh
 qmd collection metadata --match '{"field":"key","operator":"eq","value":"priority"}'
@@ -1178,17 +1146,17 @@ priority  number | string  1,427 of 2,100 documents
 To report one side only, add a `type` condition on the value field. The filter that reaches exactly those documents is the same condition with the metadata key in `field`:
 
 ```sh
-qmd collection metadata work --match '{
+qmd collection metadata --match '{
   "operator": "and",
   "operands": [
     { "field": "key", "operator": "eq", "value": "priority" },
     { "field": "value", "operator": "type", "value": "number" }
   ]
 }'
-qmd query "release checklist" -c work --filter '{"field":"priority","operator":"type","value":"number"}'
+qmd query "release checklist" --filter '{"field":"priority","operator":"type","value":"number"}'
 ```
 
-`qmd collection list` names each collection's top keys, `qmd collection show <name>` details the top five with a value preview, and `qmd status` summarizes how many keys and files carry metadata. These summaries read current index data, so their cost depends on the metadata in scope. MCP initialization does not compute unused key summaries.
+`qmd collection list` names each collection's top keys, `qmd collection show <name>` details the top five with a value preview, and `qmd status` summarizes how many keys and files carry metadata.
 
 The CLI prints text and rejects unsupported format flags. Structured discovery is available through the SDK, MCP, and HTTP with the same options (`collection`, `match`, `filter`, `keyLimit`, `keyOffset`, `valueLimit`, `valueOffset`, `sort`, `minCount`) and the same result shape:
 
@@ -1215,9 +1183,9 @@ published.filteredDocuments    // the denominator for every coverage count in th
 const nextPage = await store.listMetadata({ keyLimit: 50, keyOffset: 50 })
 ```
 
-`filter` is a `MetadataFilter` and `match` is a `MetadataMatch`. Both are `MetadataPredicate<Condition>`, the one recursive grammar, over the conditions each record admits, so a document-only condition (`exists`, `all`, or a metadata key as the `field`) is a type error in a match as well as a runtime one. Options outside their domain throw `MetadataOptionError`. A `filter` and `match` that each pass the grammar's limits but together bind more SQL parameters than `METADATA_SQL_BINDING_BUDGET` throw `MetadataBindingBudgetError` before any statement runs.
+`filter` is a `MetadataFilter` and `match` is a `MetadataMatch`. Both are `MetadataPredicate<Condition>`, the one recursive grammar over the conditions each record admits, so a document-only condition (`exists`, `all`, or a metadata key as the `field`) is a type error in a match as well as a runtime one. An option outside its domain throws `MetadataOptionError`, and a `filter` and `match` that together bind more SQL parameters than one statement allows throw `MetadataBindingBudgetError`.
 
-The MCP `metadata` tool takes the same options with `collections` spelled as on `query`, returns the CLI shape as text and the result as `structuredContent`, and the MCP `status` tool lists each collection's most covered key names and types (with a count of the rest) so an agent's first call reveals that metadata exists. `POST /metadata` accepts the same body as the tool and returns the same result (`400` on an invalid match, filter, or option, or a filter and match over the binding budget).
+The MCP `metadata` tool takes the same options with `collections` spelled as on `query`, returns the CLI text plus the result as `structuredContent`, and the MCP `status` tool lists each collection's most covered keys so an agent's first call reveals that metadata exists. `POST /metadata` accepts the same body as the tool and returns the same result (`400` on an invalid match, filter, or option).
 
 ### Output Format
 

@@ -507,22 +507,13 @@ function readMetadataReport(
 }
 
 /**
- * Key names, coverage, and types for the documents in scope, in coverage
- * order, windowed to the first `keyLimit` keys. One GROUP BY, no values: what
- * `collection list`, `status`, and the MCP status tool print so a first look
- * reveals that metadata exists. `countMetadataKeys` gives the total.
+ * Every collection's key names, coverage, and types, in coverage order,
+ * windowed to the first `keyLimit` keys per collection. One GROUP BY, no
+ * values: what `collection list`, `status`, and the MCP status tool print so
+ * a first look reveals that metadata exists.
  */
-export function listMetadataKeys(db: Database, collectionNames?: string[], keyLimit: number = DEFAULT_METADATA_KEY_LIMIT): MetadataKeyOverview[] {
-  return getMetadataOverview(db, collectionNames, keyLimit).keys;
-}
-
-export function getMetadataOverview(db: Database, collectionNames?: string[], keyLimit: number = DEFAULT_METADATA_KEY_LIMIT): MetadataOverview {
-  return queryMetadataOverviews(db, buildEligibleCte(collectionNames, undefined), "''", keyLimit).get("") ?? { totalKeys: 0, keys: [] };
-}
-
-/** Read every collection's overview in one pass, not two queries per collection. */
 export function listMetadataCollectionSummaries(db: Database, keyLimit: number = DEFAULT_METADATA_KEY_LIMIT): Map<string, MetadataOverview> {
-  return queryMetadataOverviews(db, buildEligibleCte(undefined, undefined), "e.collection", keyLimit);
+  return queryMetadataOverviews(db, buildEligibleCte(undefined, undefined), keyLimit);
 }
 
 interface MetadataKeyCoverage {
@@ -535,22 +526,22 @@ interface MetadataKeyCoverage {
   total_keys: number;
 }
 
-function queryMetadataOverviews(db: Database, eligible: Region, collectionSql: string, keyLimit: number): Map<string, MetadataOverview> {
+function queryMetadataOverviews(db: Database, eligible: Region, keyLimit: number): Map<string, MetadataOverview> {
   const region = buildRegion(eligible);
   // Ordinal zero represents a document/key once. Extraction guarantees one
   // homogeneous type per key, so arrays need neither value reads nor DISTINCT.
   const coverages = db.prepare(`
     ${region.withSql},
     key_coverages AS (
-      SELECT ${collectionSql} AS collection, mv.key, COUNT(*) AS documents,
+      SELECT e.collection AS collection, mv.key, COUNT(*) AS documents,
         SUM(mv.value_type = 'string') AS string_documents,
         SUM(mv.value_type = 'number') AS number_documents,
         SUM(mv.value_type = 'boolean') AS boolean_documents,
-        COUNT(*) OVER (PARTITION BY ${collectionSql}) AS total_keys,
-        ROW_NUMBER() OVER (PARTITION BY ${collectionSql} ORDER BY COUNT(*) DESC, mv.key) AS rank
+        COUNT(*) OVER (PARTITION BY e.collection) AS total_keys,
+        ROW_NUMBER() OVER (PARTITION BY e.collection ORDER BY COUNT(*) DESC, mv.key) AS rank
       ${region.fromSql}
       WHERE mv.ordinal = 0
-      GROUP BY ${collectionSql}, mv.key
+      GROUP BY e.collection, mv.key
     )
     SELECT * FROM key_coverages WHERE rank <= ? OR ? = -1 ORDER BY collection, rank
   `).all(...region.withParams, ...region.fromParams, Number.isFinite(keyLimit) ? keyLimit : -1, Number.isFinite(keyLimit) ? keyLimit : -1) as MetadataKeyCoverage[];

@@ -670,18 +670,12 @@ function compileTextTestSql(
     return `instr(${columnSql}, ?) > 0`;
   }
 
-  params.push(utf8ByteLengthOf(operand), operand);
+  params.push(Buffer.byteLength(operand, "utf-8"), operand);
   // SQLite returns NULL for a substring of an empty BLOB. Each primitive
   // must return a boolean so entry matches and their negations partition rows.
   return operator === "prefix"
     ? `COALESCE(substr(CAST(${columnSql} AS BLOB), 1, ?) = CAST(? AS BLOB), 0)`
     : `COALESCE(substr(CAST(${columnSql} AS BLOB), -?) = CAST(? AS BLOB), 0)`;
-}
-
-const utf8Encoder = new TextEncoder();
-
-function utf8ByteLengthOf(text: string): number {
-  return utf8Encoder.encode(text).byteLength;
 }
 
 function valueTypeOf(scalar: MetadataScalar): MetadataValueType {

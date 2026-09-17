@@ -669,35 +669,25 @@ Intent-aware lex (C++ performance, not sports):
     "metadata",
     {
       title: "Metadata Discovery",
-      description: `Discover which metadata keys exist, what types they hold, and how many documents share each value, so you can write a precise \`filter\` for the query tool.
-
-Documents carry metadata as \`qmd.metadata\` frontmatter (strings, numbers, booleans, or arrays of one of those). This tool reports what is indexed, never guesses.
+      description: `Discover which metadata keys exist, what types they hold, and how many documents share each value, so you can write a \`filter\` for the query tool from what is indexed instead of guessing.
 
 ## Mental model
 
-\`filter\` selects WHICH documents are counted. \`match\` selects WHICH metadata entries of those documents are reported. Both take the same recursive AST as the query tool's \`filter\`. A condition tests one \`field\` of the record under evaluation: for \`filter\` the record is a document and \`field\` names one of its metadata keys, for \`match\` the record is a metadata entry and \`field\` is \`"key"\` (the entry's key name) or \`"value"\` (its value). Every operator applies (eq/ne/gt/gte/lt/lte, in/nin, contains/prefix/suffix, type, and/or/not, caseInsensitive), except \`exists\` and \`all\`, which have no meaning for a single entry.
+\`filter\` selects WHICH documents are counted. \`match\` selects WHICH metadata entries of those documents are reported. Both take the same recursive AST as the query tool's \`filter\`. A condition tests one \`field\` of the record under evaluation: for \`filter\` the record is a document and \`field\` names one of its metadata keys, for \`match\` the record is a metadata entry and \`field\` is \`"key"\` or \`"value"\`. Every operator applies to a match except \`exists\` and \`all\`, which have no meaning for a single entry.
 
 | match | Question answered |
 |---|---|
 | (none) | Which keys exist, with a window of values each |
 | \`{"field":"key","operator":"eq","value":"topics"}\` | Everything about one key |
 | \`{"field":"key","operator":"prefix","value":"mem-"}\` | A family of keys |
-| \`{"field":"key","operator":"in","value":["tags","topics","labels"]}\` | Which of these key names exist |
-| \`{"field":"value","operator":"eq","value":"docs-team"}\` | Which keys hold this value (reverse lookup) |
-| \`{"field":"value","operator":"prefix","value":"2025-"}\` | Which keys hold values shaped like this |
-| \`{"field":"value","operator":"type","value":"boolean"}\` | Which keys hold booleans |
+| \`{"field":"value","operator":"eq","value":"docs-team"}\` | Which keys hold this value |
 | \`{"operator":"and","operands":[{"field":"key","operator":"eq","value":"priority"},{"field":"value","operator":"gte","value":3}]}\` | Values of one key above a threshold |
-| \`{"operator":"and","operands":[{"field":"key","operator":"eq","value":"priority"},{"field":"value","operator":"type","value":"number"}]}\` | The numeric side of a key whose documents disagree on type |
 
-Compose with and/or/not to ask several of these in one call. Add \`filter\` to any of them to see what remains after narrowing, e.g. the topics among published documents. The result then reports \`filteredDocuments\`, how many documents pass, and every coverage count is measured against that population.
+Add \`filter\` to any of these to see what remains after narrowing. The result then reports \`filteredDocuments\`, and every coverage count is measured against that population.
 
 ## Reading the result
 
-\`totalKeys\` keys have a matching entry. \`keys\` holds one window of them ordered by coverage (\`keyLimit\`, default 50, from \`keyOffset\`), and \`remainingKeys\` says how many follow the window. Each key splits by type. Metadata is validated per document, never across documents, so a key can hold numbers in some files and strings in others within a single collection as easily as across collections. A key with more than one type reports each type separately with its own document count and contributing collections, so you can see how many documents a typed filter would reach. Per type: \`documents\` holding it, \`distinctValues\`, one window of \`values\` with document counts (\`valueLimit\`, default 10, from \`valueOffset\`), and \`remainingValues\` after the window. Both remainders are exact. Numbers also report \`range\` (min, median, max) for writing gt/lt thresholds. Counts are documents, not values: a document with \`topics: [a, b]\` counts once for each.
-
-## Paging
-
-Page keys with \`keyOffset\` (next page starts at \`keyOffset + keys.length\`) and values with \`valueOffset\`, which applies to every key in the result and so reads best after \`match\` narrows to one key. Raise a limit instead when the remainder is small.
+Counts are documents, not values. \`keys\` is one window of \`totalKeys\` in coverage order, and \`remainingKeys\` is the exact count after it. Each key splits by type: metadata is validated per document, so a key can hold numbers in some files and strings in others, and each type reports its own \`documents\`, \`distinctValues\`, a window of \`values\`, \`remainingValues\`, and, for numbers, \`range\` (min, median, max). Page keys with \`keyOffset\` and values with \`valueOffset\`, which applies to every key in the result and so reads best after \`match\` narrows to one key.
 
 Every value reported here can be matched with \`{field: '<metadata-key>', operator: 'eq', value}\` under the same collections.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -759,7 +749,7 @@ Every value reported here can be matched with \`{field: '<metadata-key>', operat
         keyWindowHint: "a higher 'keyLimit' or a 'keyOffset'",
         keyOffset,
         keyOffsetLabel: "keyOffset",
-        emptyMessage: "No metadata matches. Call without match/filter to see every key, or check the status tool for collections with metadata.",
+        emptyMessage: "No metadata matches. Call without match/filter to see which keys exist, or check the status tool for collections with metadata.",
       });
 
       return {

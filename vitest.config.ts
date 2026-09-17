@@ -8,6 +8,7 @@ export default defineConfig({
     typecheck: {
       enabled: true,
       include: ["test/**/*.test-d.ts"],
+      // Judge only the .test-d.ts assertions; tsc covers src/ separately.
       ignoreSourceErrors: true,
     },
   },

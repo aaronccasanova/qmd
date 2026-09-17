@@ -82,7 +82,7 @@ export function formatMetadataKeySummaries(result: ListMetadataResult, options: 
  * body per type. Coverage is measured against the documents the filter
  * admitted when there is one, otherwise against every active document.
  */
-export function formatMetadataKeySummary(summary: MetadataKeySummary, result: ListMetadataResult, options: FormatMetadataOptions): string {
+function formatMetadataKeySummary(summary: MetadataKeySummary, result: ListMetadataResult, options: FormatMetadataOptions): string {
   const colors = options.colors ?? NO_COLORS;
   const typeLabel = summary.types.map(typeLabelOf).join(" | ");
   const coverage = `${formatCount(summary.documents)} of ${formatCount(result.filteredDocuments ?? result.documents)} documents`;
