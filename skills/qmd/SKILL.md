@@ -204,11 +204,33 @@ Omit `-c` to search everything.
 Documents can carry typed metadata in a `qmd.metadata` frontmatter block (strings, numbers, booleans, or flat arrays). `search`, `vsearch`, and `query` accept `--filter` with a recursive JSON AST; every returned result satisfies it:
 
 ```bash
-qmd search "authentication" --filter '{"key":"status","operator":"eq","value":"published"}'
-qmd query "dependency injection" --filter '{"operator":"and","operands":[{"key":"topics","operator":"all","value":["typescript"]},{"key":"status","operator":"nin","value":["draft","archived"]}]}'
+qmd search "authentication" --filter '{"field":"status","operator":"eq","value":"published"}'
+qmd query "dependency injection" --filter '{"operator":"and","operands":[{"field":"topics","operator":"all","value":["typescript"]},{"field":"status","operator":"nin","value":["draft","archived"]}]}'
 ```
 
-Nodes are discriminated by `operator`: groups `and`/`or` take `operands`, `not` takes one `operand`, and conditions take `key` + `value` with operators `eq`/`ne`/`gt`/`gte`/`lt`/`lte` (comparison), `in`/`nin`/`all` (membership), or `exists` (presence). Matching is typed and exact; missing keys do not match `ne`/`nin` (add an `exists: false` branch in an `or` group to include them). The MCP `query` tool accepts the same AST as a `filter` object. JSON output includes each result's `metadata`.
+Nodes are discriminated by `operator`: groups `and`/`or` take `operands`, `not` takes one `operand`, and conditions take `field` + `value` with operators `eq`/`ne`/`gt`/`gte`/`lt`/`lte` (comparison), `in`/`nin`/`all` (membership), `contains`/`prefix`/`suffix` (text), `type` (the value is a `string`, `number`, or `boolean`), or `exists` (presence). Matching is typed and exact; missing keys do not match `ne`/`nin` (add an `exists: false` branch in an `or` group to include them). Conditions with a string value may add `"caseInsensitive": true`, which folds ASCII letters. The MCP `query` tool accepts the same AST as a `filter` object. JSON output includes each result's `metadata`.
+
+## Discover metadata before filtering
+
+Do not guess keys or values. `qmd collection show <name>` lists the top keys with types and a value preview, and `qmd collection metadata` drills in. Same metadata, different unit: `--filter` narrows documents (which are counted), `--match` narrows the metadata itself (which entries are reported). Both take the same predicate AST as `--filter` above, applied to a different record: in a match, a condition's `field` is `"key"` (the entry's key name) or `"value"` (its value), and every operator applies except `exists` and `all`:
+
+```bash
+qmd collection metadata notes                                                                    # the 50 most covered keys, ten values each
+qmd collection metadata notes --match '{"field":"key","operator":"eq","value":"topics"}'           # one key: coverage, distinct count, top values
+qmd collection metadata notes --match '{"field":"key","operator":"prefix","value":"mem-"}'         # a family of keys
+qmd collection metadata notes --match '{"field":"value","operator":"eq","value":"docs-team"}'      # reverse lookup: which keys hold this value
+qmd collection metadata notes --match '{"field":"value","operator":"type","value":"boolean"}'      # which keys hold booleans
+qmd collection metadata notes --match '{"operator":"and","operands":[{"field":"key","operator":"eq","value":"priority"},{"field":"value","operator":"gte","value":3}]}'
+qmd collection metadata notes --match '{"field":"key","operator":"eq","value":"topics"}' --filter '{"field":"status","operator":"eq","value":"published"}'
+qmd collection metadata notes --key-limit 50 --key-offset 50                                       # the next page of keys
+qmd collection metadata notes --match '{"field":"key","operator":"eq","value":"topics"}' --value-offset 10   # the next page of one key's values
+```
+
+Compose with `and`/`or`/`not` to ask several things in one call, and add `"caseInsensitive": true` to a string condition when the corpus mixes case.
+
+Read the header first: `topics  string[]  388 of 480 documents  1,204 distinct` tells you coverage and cardinality before you commit to a filter. With `--filter`, a `filter: 312 of 480 documents` line opens the output and every coverage count is out of those 312. Counts are documents, not values. A value printed in double quotes is a string whose bare form would mislead (`"42"` is a string, `42` a number, `""` is empty), so paste it into a filter as the JSON string it is. A `N more values` or `N more keys` footer means a list was windowed. Page with `--value-offset`/`--key-offset` or raise `--value-limit`/`--key-limit` rather than assuming the rest. Numbers print `min`, `median`, and `max` so you can write a `gt`/`lt` threshold in one call. A key shown as `number | string` means documents disagree on type. Metadata is validated per document, so this happens within a single collection as readily as across collections. Each type reports its own document count. Filter by the type that covers the documents you want. Every value shown can be matched with `eq` under the same collection scope.
+
+Over MCP, call the `metadata` tool (same options, `collections` as an array) and read `totalKeys`, `remainingKeys`, `remainingValues`, and `range` from the structured result. Page keys with `keyOffset` and values with `valueOffset`. The `status` tool lists each collection's most covered key names and types, so check it first.
 
 ## MCP Tool: `query`
 
