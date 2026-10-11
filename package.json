@@ -26,7 +26,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "prepare": "node scripts/install-hooks.mjs && node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "lint": "oxlint",
     "test": "node scripts/test-all.mjs",
@@ -42,7 +42,9 @@
     "vsearch": "tsx src/cli/qmd.ts vsearch",
     "rerank": "tsx src/cli/qmd.ts rerank",
     "inspector": "npx @modelcontextprotocol/inspector tsx src/cli/qmd.ts mcp",
-    "release": "./scripts/release.sh",
+    "changeset": "changeset",
+    "version": "changeset version && node scripts/sync-plugin-version.mjs",
+    "release": "npm run build && changeset publish",
     "smoke:package-grammars": "node scripts/check-package-grammars.mjs"
   },
   "publishConfig": {
@@ -79,6 +81,7 @@
     "sqlite-vec-windows-x64": "0.1.9"
   },
   "devDependencies": {
+    "@changesets/cli": "3.0.3",
     "@oxlint/plugins": "1.78.0",
     "@types/better-sqlite3": "7.6.13",
     "oxlint": "1.78.0",

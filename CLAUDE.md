@@ -174,12 +174,12 @@ bun test --preload ./src/test-preload.ts test/
 
 ## Releasing
 
-Use `/release <version>` to cut a release. Full changelog standards,
-release workflow, and git hook setup are documented in the
-[release skill](skills/release/SKILL.md).
+Releases are automated with [Changesets](https://github.com/changesets/changesets).
+See [.changeset/README.md](.changeset/README.md) for the changelog standard.
 
 Key points:
-- Add changelog entries under `## [Unreleased]` **as you make changes**
-- The release script renames `[Unreleased]` → `[X.Y.Z] - date` at release time
+- Include a changeset in every PR that changes what ships: `bun run changeset`
+- Do not edit `CHANGELOG.md` or bump `package.json` by hand
+- Merging to `main` creates or updates a "Version Packages" PR with the version bump and changelog
+- Merging that PR publishes to npm, pushes the `vX.Y.Z` tag, and creates the GitHub release
 - Credit external PRs with `#NNN (thanks @username)`
-- GitHub releases roll up the full minor series (e.g. 1.2.0 through 1.2.3)

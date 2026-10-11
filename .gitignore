@@ -12,6 +12,7 @@ texts/
 !README.md
 !CLAUDE.md
 !CHANGELOG.md
+!.changeset/*.md
 !skills/**/*.md
 !finetune/*.md
 !docs/*.md

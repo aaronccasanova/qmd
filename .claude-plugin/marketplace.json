@@ -17,7 +17,7 @@
 			"repository": "https://github.com/tobi/qmd",
 			"license": "MIT",
 			"keywords": ["markdown", "search", "qmd"],
-			"skills": ["./qmd", "./release"],
+			"skills": ["./qmd"],
 			"mcpServers": {
 				"qmd": {
 					"command": "qmd",
