@@ -2,7 +2,12 @@ name: Publish
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -10,6 +15,7 @@ jobs:
 
     permissions:
       contents: write
+      pull-requests: write
       id-token: write
 
     steps:
@@ -25,32 +31,14 @@ jobs:
       - name: Verify lockfile is up-to-date
         run: bun install --frozen-lockfile
 
-      - run: bun test --timeout 60000 --preload ./src/test-preload.ts test/
-        env:
-          CI: true
-          LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - run: npm run build
-      - run: npm publish --provenance --access public
-
-      - name: Extract release notes
-        id: notes
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          NOTES=$(./scripts/extract-changelog.sh "$VERSION")
-          # Write to file for gh release (avoids quoting issues)
-          echo "$NOTES" > /tmp/release-notes.md
-
-      - name: Create GitHub release
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file /tmp/release-notes.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create or update the Version Packages PR, or publish
+        uses: changesets/action@v2
+        with:
+          version-script: bun run version
+          publish-script: bun run release
